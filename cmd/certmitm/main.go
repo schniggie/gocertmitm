@@ -27,6 +27,8 @@ var (
 	autoTest     = flag.Bool("autotest", true, "Automatically test all methods for each domain")
 	retrySeconds = flag.Int("retryseconds", 86400, "Time in seconds to wait before retesting a domain (default: 24 hours)")
 	maxAttempts  = flag.Int("maxattempts", 1, "Maximum number of attempts for each test type before moving to the next test")
+	webui        = flag.Bool("webui", false, "Enable the web UI")
+	webuiAddr    = flag.String("webui-addr", ":8081", "Address to listen on for the web UI")
 )
 
 func main() {
@@ -53,6 +55,9 @@ func main() {
 	if err != nil {
 		logger.Fatalf("Failed to initialize proxy server: %v", err)
 	}
+
+	// Set the broadcaster on the logger
+	logger.SetBroadcaster(proxyServer)
 
 	// Set the max attempts for each test type
 	proxyServer.SetMaxAttempts(*maxAttempts)
@@ -103,6 +108,16 @@ func main() {
 			logger.Fatalf("Proxy server error: %v", err)
 		}
 	}()
+
+	// Start web UI if enabled
+	if *webui {
+		go func() {
+			logger.Infof("Starting web UI on %s", *webuiAddr)
+			if err := proxyServer.StartWebUI(*webuiAddr); err != nil {
+				logger.Fatalf("Web UI error: %v", err)
+			}
+		}()
+	}
 
 	logger.Infof("CertMITM proxy started, HTTP on %s, HTTPS on %s", *listenAddr, *listenAddrs)
 	logger.Infof("Press Ctrl+C to stop")

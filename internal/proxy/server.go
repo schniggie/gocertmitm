@@ -82,6 +82,11 @@ type Server struct {
 	clientDestMu        sync.Mutex                                // Mutex for clientDestinations
 	recentDomains       []string                                  // Track recently accessed domains
 	recentDomainsMu     sync.Mutex                                // Mutex for recentDomains
+	hub                 *Hub
+}
+
+func (s *Server) Broadcast(message []byte) {
+	s.hub.broadcast <- message
 }
 
 // NewServer creates a new proxy server
@@ -117,7 +122,10 @@ func NewServer(httpAddr, httpsAddr string, certManager *certificates.Manager, lo
 		directTunnelDomains: make(map[string]bool),
 		clientDestinations:  make(map[string]string), // Track client IP to destination mapping
 		recentDomains:       make([]string, 0, 10),   // Track up to 10 recent domains
+		hub:                 newHub(),
 	}
+
+	go server.hub.run()
 
 	// Create HTTP server
 	httpHandler := http.HandlerFunc(server.handleHTTP)

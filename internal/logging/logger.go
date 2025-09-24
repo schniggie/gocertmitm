@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -9,6 +10,11 @@ import (
 	"sync"
 	"time"
 )
+
+// Broadcaster defines the interface for broadcasting messages
+type Broadcaster interface {
+	Broadcast(message []byte)
+}
 
 // Logger provides logging functionality
 type Logger struct {
@@ -22,6 +28,7 @@ type Logger struct {
 	nextReqID     uint64
 	reqIDMap      map[string]string // Maps clientIP:host to request ID
 	mu            sync.Mutex        // Mutex to protect concurrent access to reqIDMap and nextReqID
+	broadcaster   Broadcaster
 }
 
 // NewLogger creates a new logger
@@ -82,51 +89,104 @@ func (l *Logger) Close() error {
 	return nil
 }
 
+// SetBroadcaster sets the broadcaster for the logger
+func (l *Logger) SetBroadcaster(b Broadcaster) {
+	l.broadcaster = b
+}
+
 // Infof logs an info message
 func (l *Logger) Infof(format string, v ...interface{}) {
-	l.infoLogger.Printf(format, v...)
+	msg := fmt.Sprintf(format, v...)
+	l.infoLogger.Print(msg)
+	if l.broadcaster != nil {
+		logEntry := map[string]string{"type": "log", "message": msg}
+		jsonEntry, _ := json.Marshal(logEntry)
+		l.broadcaster.Broadcast(jsonEntry)
+	}
 }
 
 // InfoWithRequestIDf logs an info message with a request ID
 func (l *Logger) InfoWithRequestIDf(reqID, format string, v ...interface{}) {
-	l.infoLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+	msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+	l.infoLogger.Print(msg)
+	if l.broadcaster != nil {
+		logEntry := map[string]string{"type": "log", "message": msg}
+		jsonEntry, _ := json.Marshal(logEntry)
+		l.broadcaster.Broadcast(jsonEntry)
+	}
 }
 
 // Errorf logs an error message
 func (l *Logger) Errorf(format string, v ...interface{}) {
-	l.errorLogger.Printf(format, v...)
+	msg := fmt.Sprintf(format, v...)
+	l.errorLogger.Print(msg)
+	if l.broadcaster != nil {
+		logEntry := map[string]string{"type": "log", "message": msg}
+		jsonEntry, _ := json.Marshal(logEntry)
+		l.broadcaster.Broadcast(jsonEntry)
+	}
 }
 
 // ErrorWithRequestIDf logs an error message with a request ID
 func (l *Logger) ErrorWithRequestIDf(reqID, format string, v ...interface{}) {
-	l.errorLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+	msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+	l.errorLogger.Print(msg)
+	if l.broadcaster != nil {
+		logEntry := map[string]string{"type": "log", "message": msg}
+		jsonEntry, _ := json.Marshal(logEntry)
+		l.broadcaster.Broadcast(jsonEntry)
+	}
 }
 
 // Verbosef logs a verbose message
 func (l *Logger) Verbosef(format string, v ...interface{}) {
 	if l.verbose {
-		l.verboseLogger.Printf(format, v...)
+		msg := fmt.Sprintf(format, v...)
+		l.verboseLogger.Print(msg)
+		if l.broadcaster != nil {
+			logEntry := map[string]string{"type": "log", "message": msg}
+			jsonEntry, _ := json.Marshal(logEntry)
+			l.broadcaster.Broadcast(jsonEntry)
+		}
 	}
 }
 
 // VerboseWithRequestIDf logs a verbose message with a request ID
 func (l *Logger) VerboseWithRequestIDf(reqID, format string, v ...interface{}) {
 	if l.verbose {
-		l.verboseLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+		msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+		l.verboseLogger.Print(msg)
+		if l.broadcaster != nil {
+			logEntry := map[string]string{"type": "log", "message": msg}
+			jsonEntry, _ := json.Marshal(logEntry)
+			l.broadcaster.Broadcast(jsonEntry)
+		}
 	}
 }
 
 // Debugf logs a debug message
 func (l *Logger) Debugf(format string, v ...interface{}) {
 	if l.debug {
-		l.debugLogger.Printf(format, v...)
+		msg := fmt.Sprintf(format, v...)
+		l.debugLogger.Print(msg)
+		if l.broadcaster != nil {
+			logEntry := map[string]string{"type": "log", "message": msg}
+			jsonEntry, _ := json.Marshal(logEntry)
+			l.broadcaster.Broadcast(jsonEntry)
+		}
 	}
 }
 
 // DebugWithRequestIDf logs a debug message with a request ID
 func (l *Logger) DebugWithRequestIDf(reqID, format string, v ...interface{}) {
 	if l.debug {
-		l.debugLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+		msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+		l.debugLogger.Print(msg)
+		if l.broadcaster != nil {
+			logEntry := map[string]string{"type": "log", "message": msg}
+			jsonEntry, _ := json.Marshal(logEntry)
+			l.broadcaster.Broadcast(jsonEntry)
+		}
 	}
 }
 

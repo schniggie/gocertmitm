@@ -16,7 +16,8 @@ build:
 	$(GOBUILD) -race -o $(BINARY_NAME) -v ./cmd/certmitm
 
 test:
-	$(GOTEST) -v ./...
+	@echo "Running tests..."
+	@$(GOTEST) -v ./cmd/... ./internal/... ./pkg/...
 
 clean:
 	$(GOCLEAN)
