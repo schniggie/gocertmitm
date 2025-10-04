@@ -104,7 +104,10 @@ func (m *Manager) GetCertificate(domain string, testType TestType) (*tls.Certifi
 
 	// Check if we have the certificate in cache first
 	cacheKey := fmt.Sprintf("%s-%d", domain, testType)
-	if certPair, ok := m.CertCache[cacheKey]; ok {
+	m.cacheMutex.RLock()
+	certPair, ok := m.CertCache[cacheKey]
+	m.cacheMutex.RUnlock()
+	if ok {
 		m.logger.Debugf("Using cached certificate for %s (test type: %s)", domain, testType.GetTestTypeName())
 		return &certPair.TLSCert, nil
 	}
@@ -203,7 +206,9 @@ func (m *Manager) GetCertificate(domain string, testType TestType) (*tls.Certifi
 								PrivateKey:  privateKey,
 								TLSCert:     tlsCert,
 							}
+							m.cacheMutex.Lock()
 							m.CertCache[cacheKey] = certPair
+							m.cacheMutex.Unlock()
 							return &tlsCert, nil
 						}
 					} else {
@@ -231,7 +236,9 @@ func (m *Manager) GetCertificate(domain string, testType TestType) (*tls.Certifi
 	}
 
 	// Add to cache with the proper key
+	m.cacheMutex.Lock()
 	m.CertCache[cacheKey] = certPair
+	m.cacheMutex.Unlock()
 
 	m.logger.Debugf("Successfully generated certificate for %s", domain)
 	return &certPair.TLSCert, nil

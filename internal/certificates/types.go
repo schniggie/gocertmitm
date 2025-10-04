@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -76,6 +77,7 @@ type Manager struct {
 	CertDir       string
 	CA            *CertificateAuthority
 	CertCache     map[string]*CertificatePair
+	cacheMutex    sync.RWMutex // Protects CertCache from concurrent access
 	DefaultConfig CertConfig
 	logger        Logger
 }
