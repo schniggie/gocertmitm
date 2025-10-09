@@ -76,8 +76,11 @@ func (m *Manager) GenerateCA() (*CertificateAuthority, error) {
 // GenerateCertificate generates a certificate for the given domain
 func (m *Manager) GenerateCertificate(domain string, testType TestType) (*CertificatePair, error) {
 	// Check if certificate is already in cache
-	if cert, ok := m.CertCache[domain]; ok {
-		return cert, nil
+	m.cacheMutex.RLock()
+	cachedCert, ok := m.CertCache[domain]
+	m.cacheMutex.RUnlock()
+	if ok {
+		return cachedCert, nil
 	}
 
 	// Generate private key
@@ -182,7 +185,9 @@ func (m *Manager) GenerateCertificate(domain string, testType TestType) (*Certif
 				PrivateKey:  realKey,
 				TLSCert:     tlsCert,
 			}
+			m.cacheMutex.Lock()
 			m.CertCache[domain] = certPair
+			m.cacheMutex.Unlock()
 
 			// Log certificate details for debugging
 			m.logger.Debugf("Certificate Subject: %s", realCert.Subject.CommonName)
@@ -237,7 +242,9 @@ func (m *Manager) GenerateCertificate(domain string, testType TestType) (*Certif
 	}
 
 	// Add to cache
+	m.cacheMutex.Lock()
 	m.CertCache[domain] = certPair
+	m.cacheMutex.Unlock()
 
 	return certPair, nil
 }
