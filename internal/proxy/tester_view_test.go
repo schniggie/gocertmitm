@@ -17,7 +17,9 @@ func newTestTester(t *testing.T) *Tester {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { logger.Close() })
-	return NewTesterWithRetryPeriod(logger, certificates.SelfSigned, time.Hour, 1)
+	tester := NewTesterWithRetryPeriod(logger, certificates.SelfSigned, time.Hour, 1)
+	t.Cleanup(tester.Close) // runs before the working directory is restored
+	return tester
 }
 
 func testState(v DomainView, key string) string {

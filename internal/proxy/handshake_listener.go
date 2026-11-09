@@ -97,6 +97,17 @@ func (h *tlsHandshakeListener) Close() error {
 	return h.inner.Close()
 }
 
+// Inject runs the TLS handshake on a connection obtained outside the
+// listener (a hijacked CONNECT tunnel) and serves it like an accepted one
+func (h *tlsHandshakeListener) Inject(conn net.Conn) {
+	select {
+	case <-h.done:
+		_ = conn.Close()
+	default:
+		go h.handshake(conn)
+	}
+}
+
 // Addr returns the address of the underlying listener
 func (h *tlsHandshakeListener) Addr() net.Addr {
 	return h.inner.Addr()
