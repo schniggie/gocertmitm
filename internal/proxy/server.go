@@ -505,9 +505,15 @@ func (s *Server) getAutoTestCertificateFunc() func(*tls.ClientHelloInfo) (*tls.C
 			return nil, &DirectTunnelError{Domain: serverName}
 		}
 
-		// Get the next test to try for this domain or IP
+		// Get the next test to try. With SNI, results are keyed by the
+		// hostname - the same key the handshake listener records failures
+		// under - so selection, failures and successes share one status.
+		// Only SNI-less connections fall back to IP-based grouping.
 		var testType certificates.TestType
-		if destIP != "" {
+		if clientHello.ServerName != "" && !isIPAddress(clientHello.ServerName) {
+			testType = s.tester.GetNextTest(serverName)
+			s.logger.DebugWithRequestIDf(reqID, "[TEST] Initial test type for domain %s: %s", serverName, testType.GetTestTypeName())
+		} else if destIP != "" {
 			// Try to get the test by IP first
 			testType = s.tester.GetNextTestByIP(destIP)
 			s.logger.DebugWithRequestIDf(reqID, "[TEST] Initial test type for IP %s: %s", destIP, testType.GetTestTypeName())
@@ -831,7 +837,14 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 		// Get a request ID for this connection
 		reqID := s.logger.GetRequestID(clientIP, hostWithoutPort)
 
-		if destIP != "" {
+		if sni := tlsServerName(r); sni != "" {
+			// Record under the SNI hostname, matching certificate selection
+			// and handshake-failure recording
+			currentTest = s.tester.GetNextTest(sni)
+			nextTest = s.tester.RecordTestResult(sni, currentTest, true)
+			s.logger.InfoWithRequestIDf(reqID, "[SUCCESS] Successful MITM for domain %s (url: %s) using %s",
+				sni, r.URL.String(), currentTest.GetTestTypeName())
+		} else if destIP != "" {
 			// Use IP-based lookup first
 			currentTest = s.tester.GetNextTestByIP(destIP)
 			nextTest = s.tester.RecordTestResult(destIP, currentTest, true)
@@ -1617,6 +1630,15 @@ func getClientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+// tlsServerName returns the SNI hostname of a decrypted request, or "" when
+// the client sent none (or sent an IP literal)
+func tlsServerName(r *http.Request) string {
+	if r.TLS == nil || r.TLS.ServerName == "" || isIPAddress(r.TLS.ServerName) {
+		return ""
+	}
+	return r.TLS.ServerName
 }
 
 // isIPAddress checks if a string is an IP address

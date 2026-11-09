@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/gocertmitm/internal/certificates"
@@ -22,58 +23,77 @@ const handshakeTimeout = 30 * time.Second
 // failures observable as structured data (client IP + SNI + error) rather
 // than as free-form log lines that need to be parsed later.
 type tlsHandshakeListener struct {
-	inner  net.Listener
-	server *Server
-	served chan net.Conn
-	done   chan struct{}
+	inner     net.Listener
+	server    *Server
+	served    chan net.Conn
+	errs      chan error
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func newTLSHandshakeListener(inner net.Listener, server *Server) *tlsHandshakeListener {
-	return &tlsHandshakeListener{
+	h := &tlsHandshakeListener{
 		inner:  inner,
 		server: server,
 		served: make(chan net.Conn, 128),
+		errs:   make(chan error),
 		done:   make(chan struct{}),
 	}
+	go h.acceptLoop()
+	return h
 }
 
-// Accept hands out connections whose TLS handshake already completed. The
-// handshake for the next pending connection runs in its own goroutine so a
-// single slow client cannot block the accept loop.
-func (h *tlsHandshakeListener) Accept() (net.Conn, error) {
+// acceptLoop accepts raw connections independently of Accept and starts a
+// handshake goroutine for each one. Accepting in the caller of Accept would
+// leave a completed handshake queued until the *next* TCP connection
+// arrived, stalling lone clients and turning their eventual broken-pipe
+// writes into bogus test failures.
+func (h *tlsHandshakeListener) acceptLoop() {
+	var backoff time.Duration
 	for {
-		select {
-		case conn := <-h.served:
-			return conn, nil
-		case <-h.done:
-			return nil, net.ErrClosed
-		default:
-		}
-
 		rawConn, err := h.inner.Accept()
 		if err != nil {
 			select {
-			case conn := <-h.served:
-				return conn, nil
+			case h.errs <- err:
 			case <-h.done:
-				return nil, net.ErrClosed
-			default:
+				return
 			}
-			return nil, err
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			// Transient failure (e.g. EMFILE): back off like net/http does
+			if backoff == 0 {
+				backoff = 5 * time.Millisecond
+			} else if backoff *= 2; backoff > time.Second {
+				backoff = time.Second
+			}
+			select {
+			case <-time.After(backoff):
+			case <-h.done:
+				return
+			}
+			continue
 		}
-
+		backoff = 0
 		go h.handshake(rawConn)
+	}
+}
+
+// Accept hands out connections whose TLS handshake already completed
+func (h *tlsHandshakeListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-h.served:
+		return conn, nil
+	case err := <-h.errs:
+		return nil, err
+	case <-h.done:
+		return nil, net.ErrClosed
 	}
 }
 
 // Close shuts down the underlying listener and unblocks Accept
 func (h *tlsHandshakeListener) Close() error {
-	select {
-	case <-h.done:
-		// already closed
-	default:
-		close(h.done)
-	}
+	h.closeOnce.Do(func() { close(h.done) })
 	return h.inner.Close()
 }
 

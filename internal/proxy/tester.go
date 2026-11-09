@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -658,6 +659,13 @@ func (t *Tester) UpdateTestOrder(initialTestType certificates.TestType) {
 		}
 	}
 
+	// Results persisted from a previous run stay valid as long as the order
+	// is unchanged; only a different order invalidates the per-domain index
+	if slices.Equal(testOrder, t.testOrder) {
+		t.logger.Infof("Test order unchanged: %v", testOrder)
+		return
+	}
+
 	t.logger.Infof("Updated test order: %v", testOrder)
 	t.testOrder = testOrder
 
@@ -665,6 +673,7 @@ func (t *Tester) UpdateTestOrder(initialTestType certificates.TestType) {
 	for _, status := range t.domains {
 		status.CurrentTestIndex = 0
 		status.TestResults = make(map[certificates.TestType]bool)
+		status.AttemptCount = make(map[certificates.TestType]int)
 		status.TestsCompleted = false
 		status.SuccessfulTestSet = false
 		status.LastTested = time.Now()
