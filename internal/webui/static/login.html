@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>GoCertMITM · Sign in</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="card login" method="post" action="/login" autocomplete="off">
+      <h1>GoCertMITM</h1>
+      <p>Enter the web UI access token. It is printed in the proxy log at startup, or set with <code>-webui-token</code> / <code>CERTMITM_WEBUI_TOKEN</code>.</p>
+      <div class="error" id="error" hidden>Invalid token.</div>
+      <input type="password" name="token" placeholder="Access token" aria-label="Access token" required autofocus>
+      <button class="btn primary" type="submit">Sign in</button>
+    </form>
+  </div>
+  <script src="/static/login.js"></script>
+</body>
+</html>

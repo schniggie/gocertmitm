@@ -23,6 +23,9 @@ const (
 	RealCertificateAsCA
 	// DirectTunnel indicates that all tests failed and we should use a direct tunnel
 	DirectTunnel
+	// Emudhra tests if clients trust the publicly compromised eMudhra intermediate CA
+	// (see https://emudhra.we-have-a-problem.com/ and mitmproxy PR #8500)
+	Emudhra
 )
 
 // GetTestTypeName returns a human-readable name for the test type
@@ -36,6 +39,8 @@ func (t TestType) GetTestTypeName() string {
 		return "Real Certificate for Different Domain (Type 2)"
 	case RealCertificateAsCA:
 		return "Real Certificate as CA (Type 3)"
+	case Emudhra:
+		return "Compromised CA (eMudhra) (Type 4)"
 	case DirectTunnel:
 		return "Direct Tunnel (No MITM)"
 	default:
@@ -80,6 +85,14 @@ type Manager struct {
 	cacheMutex    sync.RWMutex // Protects CertCache from concurrent access
 	DefaultConfig CertConfig
 	logger        Logger
+
+	// Compromised eMudhra CA material (EM OV TLS CA - G3C), used by the
+	// Emudhra test type; parsed and validated at NewManager time
+	emudhra *emudhraChain
+
+	// EmudhraChainMode selects which compromised chain variant is served:
+	// "modern", "old" or "both" (default). Set via SetEmudhraChainMode.
+	EmudhraChainMode string
 }
 
 // Logger interface for logging

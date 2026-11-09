@@ -59,10 +59,16 @@ func (m *Manager) findAnyRealCertificate() (string, string, string, error) {
 			certExists = true
 		}
 
-		// If we have a key and at least one certificate file, return this domain
+		// If we have a key and at least one certificate file, return this domain.
+		// Prefer fullchain and return the certificate file we validated so the
+		// caller never receives a path that does not exist
 		if keyExists && (fullchainExists || certExists) {
+			certFile := certPath
+			if fullchainExists {
+				certFile = fullchainPath
+			}
 			m.logger.Debugf("Found real certificate for domain: %s", domain)
-			return domain, certPath, keyPath, nil
+			return domain, certFile, keyPath, nil
 		}
 	}
 

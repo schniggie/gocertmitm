@@ -9,6 +9,7 @@ GoCertMITM is a security testing tool for identifying TLS certificate validation
   2. **Replaced key certificates**: Tests if clients verify the certificate's public key
   3. **Real certificates**: Tests if clients accept valid certificates for different domains
   4. **Real certificates as CA**: Tests if clients accept certificates signed by valid but unauthorized CAs
+  5. **Compromised CA (eMudhra)**: Tests if clients still trust a CA whose signing keys were publicly disclosed (see https://emudhra.we-have-a-problem.com/)
 
 - **Network Configuration**: Automatically configures the network to intercept connections:
   - Acts as a network gateway for client devices
@@ -21,11 +22,13 @@ GoCertMITM is a security testing tool for identifying TLS certificate validation
   - Detailed logs of intercepted data for analysis
   - Structured storage of test results for reporting
 
+- **Web Interface** (`-webui`): live dashboard of findings, per-domain test matrix, decrypted traffic and captured payloads, with retest controls and CSV/JSON export
+
 ## Installation
 
 ### Prerequisites
 
-- Go 1.18 or higher
+- Go 1.27 or higher
 - iptables (for traffic redirection)
 - Root/sudo privileges (for network configuration)
 
@@ -79,13 +82,19 @@ You can also run GoCertMITM using Docker:
 - `-logdir`: Directory to store logs (default: "./logs")
 - `-payloaddir`: Directory to store request/response payloads (default: "./payloads")
 - `-savepayloads`: Enable saving of request/response payloads (default: true)
+- `-retryseconds`: Seconds to wait before retesting a domain (default: 86400)
 - `-testtype`: Test type to start with (default: "self-signed")
   - `self-signed`: Test if clients accept self-signed certificates (Type 0)
   - `replaced-key`: Test if clients verify the certificate's public key (Type 1)
   - `real-cert`: Test if clients accept valid certificates for different domains (Type 2)
   - `real-ca`: Test if clients accept certificates signed by valid but unauthorized CAs (Type 3)
+  - `emudhra`: Test if clients trust the publicly compromised eMudhra CA (Type 4)
   - When auto-testing is disabled, only this test type will be used
   - When auto-testing is enabled, this test type will be tried first, followed by the others
+- `-emudhra-chain`: Which compromised eMudhra chain variant to serve (default: "both")
+  - `modern`: chain via `emSign Root TLS CA - G3` (trusted by all modern trust stores)
+  - `old`: chain cross-signed by `AAA Certificate Services` (frozen pre-2021 trust stores)
+  - `both`: serve both variants with the modern one first; OpenSSL-style clients only build the first path
 - `-autotest`: Automatically test all methods for each domain (default: true)
   - When enabled, the tool will try each test method for each domain until one succeeds
   - If all tests fail, the tool will provide a direct tunnel to the target server
@@ -95,6 +104,41 @@ You can also run GoCertMITM using Docker:
   - Increase this value if you want to retry a test type multiple times before moving on
   - Higher values can be useful for unstable connections or intermittent failures
   - Setting to 1 ensures the tool moves quickly through test types
+- `-webui`: Enable the web interface (default: false)
+- `-webui-addr`: Listen address for the web interface (default: "127.0.0.1:8081")
+- `-webui-token`: Access token for the web interface (default: `$CERTMITM_WEBUI_TOKEN`, otherwise a random token is generated and printed to the console)
+- `-webui-noauth`: Disable web interface authentication; only requests whose `Host` is an IP literal or `localhost` are accepted (default: false)
+
+### Web Interface
+
+Start the proxy with `-webui` and open the URL printed on the console:
+
+```bash
+./certmitm -webui
+#   Web UI: http://127.0.0.1:8081/?token=4f1c…
+```
+
+The interface is a self-contained page embedded in the binary (no CDN or external assets, so it works on offline gateways). It updates live via Server-Sent Events:
+
+- **Overview**: vulnerable/testing/secure counts, findings, active clients, and a feed of verdict changes and TLS rejections
+- **Domains**: per-target test matrix (accepted / rejected / in progress / pending for every test type), filtering, CSV/JSON export, and per-domain **Retest** and **Forget** controls
+- **Traffic**: live decrypted and proxied requests, plus TLS handshakes clients rejected; click a request to view its captured headers and body (text/hex) or download the raw payload
+- **Payloads**: browse captures on disk, including ones from earlier runs
+- **Logs**: live log tail with level and text filters
+- **Setup**: running configuration, test catalogue, transparent-mode `iptables` snippet, and the GoCertMITM CA (fingerprint and `ca.pem` download)
+
+Security notes:
+
+- The interface binds to loopback by default. Captured payloads routinely contain credentials and session tokens, so prefer an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 gateway`) over binding to a routable address.
+- Every API request requires the token, sent either as `Authorization: Bearer <token>` or as the `HttpOnly`/`SameSite=Strict` session cookie set by the login page or the `?token=` link. State-changing calls also require an `X-CertMITM-CSRF` header and a same-origin `Origin`.
+- A generated token is printed to the console only; it is not written to the log file or to the live log stream. Pass a fixed token through `CERTMITM_WEBUI_TOKEN` rather than `-webui-token` to keep it out of the process list.
+- Captured data is attacker-controlled. It is rendered only through DOM text APIs under a strict Content-Security-Policy, and payload files are read through `os.Root`, so a crafted path or symlink cannot escape the payload directory.
+
+The JSON API (`/api/info`, `/api/stats`, `/api/domains`, `/api/events?topic=request|handshake|log|domain`, `/api/stream`, `/api/payloads/...`, `/api/export.{json,csv}`, `/api/ca.pem`) can be scripted directly:
+
+```bash
+curl -H "Authorization: Bearer $CERTMITM_WEBUI_TOKEN" http://127.0.0.1:8081/api/domains | jq '.[] | select(.verdict=="vulnerable") | {domain, accepted_test}'
+```
 
 ### Network Setup
 
@@ -220,9 +264,13 @@ By default, all certificates are stored in the `./certs` directory (configurable
   │       ├── cert.pem
   │       ├── fullchain.pem
   │       └── key.pem
-  └── real-ca/              # Real certificates used as CAs
+  ├── real-ca/              # Real certificates used as CAs
+  │   └── example.com/
+  │       ├── cert.pem
+  │       └── key.pem
+  └── emudhra/              # Compromised CA (eMudhra) certificates, full chain
       └── example.com/
-          ├── cert.pem
+          ├── cert.pem      # Leaf plus the served compromised CA chain
           └── key.pem
 ```
 
@@ -230,6 +278,7 @@ By default, all certificates are stored in the `./certs` directory (configurable
 - You should install the `ca.crt` file as a trusted root CA on test devices to avoid certificate warnings
 - All generated certificates are cached in memory during runtime and saved to disk for reuse
 - Certificates are organized by test type and domain for efficient retrieval
+- The eMudhra test type needs no preparation: the compromised CA chain is embedded in the binary and validated at startup
 
 #### Test-Specific Requirements
 
@@ -279,6 +328,11 @@ By default, all certificates are stored in the `./certs` directory (configurable
    ```
    - When a client connects, the tool will use the specified certificate as a CA to sign the generated certificate
    - If no CA certificate is found for the specified domain, it falls back to using the default CA
+
+5. **Compromised CA (eMudhra) Test**:
+   - No additional files required
+   - The publicly disclosed eMudhra chain is embedded in the binary and validated against the published root certificates at startup
+   - Use `-emudhra-chain` (modern/old/both) to select which compromised chain variant is served
 
 #### Certificate Format
 
@@ -403,7 +457,44 @@ This test determines if clients accept certificates signed by valid but unauthor
 - Custom certificate stores with incorrect trust settings
 - Applications that don't properly validate the certificate chain
 
-These four testing approaches comprehensively cover the most common certificate validation vulnerabilities while keeping the testing process efficient. By testing against these specific scenarios, GoCertMITM can identify weaknesses in TLS implementations that could be exploited by attackers to perform man-in-the-middle attacks.
+### 5. Compromised CA (eMudhra)
+
+This test determines if clients still trust a certificate authority whose signing keys were publicly compromised.
+
+**Background:** The private keys of eight eMudhra intermediate CA certificates were publicly disclosed on 2026-10-20 because the keys were incorrectly generated and can be recovered from the certificates themselves. Root programs and trust stores have removed the intermediates (see https://emudhra.we-have-a-problem.com/), but many clients do not consume revocation information and only stop trusting the intermediates after a software update. mitmproxy shipped this as an option in PR #8500.
+
+**How it works:**
+- GoCertMITM signs generated leaf certificates with the publicly disclosed eMudhra "EM OV TLS CA - G3C" intermediate CA key
+- The full compromised CA chain is served in the handshake, exactly as eMudhra's infrastructure would
+- The certificates are indistinguishable from legitimately issued ones for clients whose trust store still contains the affected roots
+
+**Chain selection:** The compromised intermediate chains to two different trusted roots. Use `-emudhra-chain` to select which variant is served:
+- `modern` (default is `both`): chain via `emSign Root TLS CA - G3`, cross-signed by `emSign ECC Root CA - G3` — present in all modern trust stores
+- `old`: chain cross-signed by Sectigo's `AAA Certificate Services` — present in older or frozen pre-2021 trust stores (mirrors mitmproxy's `--emudhra-old`)
+- `both` (default): serve both variants; OpenSSL-style clients only consider the first path, so the modern variant is served first
+
+```bash
+# Explicit eMudhra test type
+./certmitm -testtype emudhra
+
+# Serve only the AAA Certificate Services cross-sign for frozen clients
+./certmitm -testtype emudhra -emudhra-chain old
+```
+
+The compromised CA material is embedded in the binary (validated against the disclosed root certificates at startup) and is publicly available; it does not require any file setup on disk.
+
+**Security implications:**
+- Clients that accept these certificates validate signatures correctly but have not received key-removal updates, demonstrating outdated trust store maintenance
+- Outside the browser ecosystem, most TLS clients perform no revocation checks and do not enforce Certificate Transparency, both of which would have mitigated this compromise
+
+**Common vulnerable scenarios:**
+- Appliances, embeddable SDKs, and long-lived server images with static trusted CA lists
+- Clients that skip intermediate revocation checking (OneCRL/CRLite/CRLSets are browser-specific)
+- Frozen pre-2021 trust stores that still trust `AAA Certificate Services`
+
+These five testing approaches comprehensively cover the most common certificate validation vulnerabilities while keeping the testing process efficient. By testing against these specific scenarios, GoCertMITM can identify weaknesses in TLS implementations that could be exploited by attackers to perform man-in-the-middle attacks.
+
+**Operator note:** tests 2 and 5 produce certificates that a vulnerable client cannot distinguish from legitimate traffic. Only run GoCertMITM against systems you are authorized to test; verifying a "successful MITM" means intercepting someone — in authorized testing, that's the point, and the results are what you are there to measure.
 
 ### Automatic Testing
 

@@ -1,12 +1,10 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -14,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gocertmitm/internal/certificates"
+	"github.com/gocertmitm/internal/events"
 	"github.com/gocertmitm/internal/logging"
 )
 
@@ -25,38 +24,6 @@ type DirectTunnelError struct {
 // Error implements the error interface
 func (e *DirectTunnelError) Error() string {
 	return fmt.Sprintf("direct tunnel requested for %s", e.Domain)
-}
-
-// directTunnelResponseWriter is a fake http.ResponseWriter that can be hijacked
-// for direct tunnel connections
-type directTunnelResponseWriter struct {
-	conn net.Conn
-	code int
-}
-
-// Header returns a dummy header map
-func (w *directTunnelResponseWriter) Header() http.Header {
-	return make(http.Header)
-}
-
-// Write writes to the connection
-func (w *directTunnelResponseWriter) Write(b []byte) (int, error) {
-	return w.conn.Write(b)
-}
-
-// WriteHeader sets the status code
-func (w *directTunnelResponseWriter) WriteHeader(code int) {
-	w.code = code
-}
-
-// Hijack returns the underlying connection
-func (w *directTunnelResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	// Create a buffered reader/writer for the connection
-	br := bufio.NewReader(w.conn)
-	bw := bufio.NewWriter(w.conn)
-	brw := bufio.NewReadWriter(br, bw)
-
-	return w.conn, brw, nil
 }
 
 // Server represents a proxy server
@@ -82,11 +49,11 @@ type Server struct {
 	clientDestMu        sync.Mutex                                // Mutex for clientDestinations
 	recentDomains       []string                                  // Track recently accessed domains
 	recentDomainsMu     sync.Mutex                                // Mutex for recentDomains
-	hub                 *Hub
-}
-
-func (s *Server) Broadcast(message []byte) {
-	s.hub.broadcast <- message
+	regularTransport    *http.Transport                           // Shared transport for regular HTTP requests
+	payloadDir          string                                    // Directory payloads are written to
+	startTime           time.Time                                 // When the server was created
+	events              *events.Bus                               // Optional observer bus (web UI)
+	stats               serverCounters                            // Monotonic counters for observers
 }
 
 // NewServer creates a new proxy server
@@ -119,13 +86,13 @@ func NewServer(httpAddr, httpsAddr string, certManager *certificates.Manager, lo
 		tester:              tester,
 		autoTest:            true, // Enable automatic testing by default
 		failedHandshakes:    make(map[string]map[certificates.TestType]bool),
+		regularTransport:    newRegularTransport(),
 		directTunnelDomains: make(map[string]bool),
 		clientDestinations:  make(map[string]string), // Track client IP to destination mapping
 		recentDomains:       make([]string, 0, 10),   // Track up to 10 recent domains
-		hub:                 newHub(),
+		payloadDir:          "./payloads",
+		startTime:           time.Now(),
 	}
-
-	go server.hub.run()
 
 	// Create HTTP server
 	httpHandler := http.HandlerFunc(server.handleHTTP)
@@ -176,7 +143,7 @@ func NewServer(httpAddr, httpsAddr string, certManager *certificates.Manager, lo
 							hello.Conn.RemoteAddr())
 
 						// Return nil to indicate that we don't want to proceed with TLS
-						return nil, fmt.Errorf("direct tunnel mode - skipping TLS handshake")
+						return nil, errDirectTunnelSkip
 					}
 
 					// Get the original destination IP
@@ -192,7 +159,7 @@ func NewServer(httpAddr, httpsAddr string, certManager *certificates.Manager, lo
 							origDestIP)
 
 						// Return nil to indicate that we don't want to proceed with TLS
-						return nil, fmt.Errorf("direct tunnel mode - skipping TLS handshake")
+						return nil, errDirectTunnelSkip
 					}
 				}
 
@@ -273,7 +240,7 @@ func NewServer(httpAddr, httpsAddr string, certManager *certificates.Manager, lo
 
 							// Return an error to prevent the TLS handshake from continuing
 							// The next connection will use the direct tunnel path above
-							return nil, fmt.Errorf("direct tunnel requested for %s - reconnect to use direct tunnel", dtErr.Domain)
+							return nil, fmt.Errorf("%w: %s", errDirectTunnelSkip, dtErr.Domain)
 						}
 
 						// For other errors, return them as-is
@@ -303,8 +270,6 @@ func NewServer(httpAddr, httpsAddr string, certManager *certificates.Manager, lo
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		// Add error logger to capture TLS handshake errors
-		ErrorLog: log.New(&tlsErrorLogger{server: server}, "", log.Lshortfile),
 	}
 
 	server.logger.Debugf("HTTPS server configured with TLS and certificate manager")
@@ -328,10 +293,10 @@ func (s *Server) Start() error {
 	// Start HTTP server with debug listener
 	go func() {
 		s.logger.Infof("Starting HTTP proxy on %s", s.httpAddr)
-		fmt.Printf("[DEBUG-SERVER] Starting HTTP proxy on %s\n", s.httpAddr)
+		s.logger.Infof("Starting HTTP proxy on %s", s.httpAddr)
 		if err := s.httpServer.Serve(httpListener); err != nil && err != http.ErrServerClosed {
 			s.logger.Errorf("HTTP server error: %v", err)
-			fmt.Printf("[DEBUG-SERVER] HTTP server error: %v\n", err)
+			s.logger.Errorf("HTTP server error: %v", err)
 		}
 	}()
 
@@ -341,18 +306,13 @@ func (s *Server) Start() error {
 		server:   s,
 	}
 
-	// Log the current direct tunnel domains map
-	s.directTunnelMu.Lock()
-	fmt.Printf("[DEBUG-SERVER-START] Current directTunnelDomains map contents:\n")
-	for domain := range s.directTunnelDomains {
-		fmt.Printf("[DEBUG-SERVER-START]   %s\n", domain)
-	}
-	s.directTunnelMu.Unlock()
-
-	// Start HTTPS server with direct tunnel listener
+	// Start HTTPS server with handshake listener. The TLS handshake is
+	// performed by the listener so failures are recorded structurally instead
+	// of being scraped from the HTTP server's error log
+	tlsListener := newTLSHandshakeListener(directTunnelListener, s)
 	s.logger.Infof("Starting HTTPS proxy on %s", s.httpsAddr)
-	fmt.Printf("[DEBUG-SERVER] Starting HTTPS proxy on %s\n", s.httpsAddr)
-	if err := s.httpsServer.ServeTLS(directTunnelListener, "", ""); err != nil && err != http.ErrServerClosed {
+	s.logger.Infof("Starting HTTPS proxy on %s", s.httpsAddr)
+	if err := s.httpsServer.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("HTTPS server error: %v", err)
 	}
 
@@ -552,9 +512,15 @@ func (s *Server) getAutoTestCertificateFunc() func(*tls.ClientHelloInfo) (*tls.C
 			return nil, &DirectTunnelError{Domain: serverName}
 		}
 
-		// Get the next test to try for this domain or IP
+		// Get the next test to try. With SNI, results are keyed by the
+		// hostname - the same key the handshake listener records failures
+		// under - so selection, failures and successes share one status.
+		// Only SNI-less connections fall back to IP-based grouping.
 		var testType certificates.TestType
-		if destIP != "" {
+		if clientHello.ServerName != "" && !isIPAddress(clientHello.ServerName) {
+			testType = s.tester.GetNextTest(serverName)
+			s.logger.DebugWithRequestIDf(reqID, "[TEST] Initial test type for domain %s: %s", serverName, testType.GetTestTypeName())
+		} else if destIP != "" {
 			// Try to get the test by IP first
 			testType = s.tester.GetNextTestByIP(destIP)
 			s.logger.DebugWithRequestIDf(reqID, "[TEST] Initial test type for IP %s: %s", destIP, testType.GetTestTypeName())
@@ -676,6 +642,7 @@ func (s *Server) SetPayloadDir(dir string) error {
 		return fmt.Errorf("failed to create payload logger: %v", err)
 	}
 	s.payloadLogger = payloadLogger
+	s.payloadDir = dir
 	return nil
 }
 
@@ -801,7 +768,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle regular HTTP request
-	s.handleRegularHTTP(w, r)
+	s.handleRegularHTTP(w, r, "http", nil)
 }
 
 // handleHTTPS handles HTTPS requests
@@ -868,6 +835,9 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 	s.trackConnection(clientIP, true)
 	defer s.trackConnection(clientIP, false)
 
+	// The certificate test the client accepted to get here
+	appliedTest := s.testType
+
 	// If auto-testing is enabled, record a successful test
 	if s.autoTest {
 		// Record successful test for this domain or IP
@@ -878,7 +848,14 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 		// Get a request ID for this connection
 		reqID := s.logger.GetRequestID(clientIP, hostWithoutPort)
 
-		if destIP != "" {
+		if sni := tlsServerName(r); sni != "" {
+			// Record under the SNI hostname, matching certificate selection
+			// and handshake-failure recording
+			currentTest = s.tester.GetNextTest(sni)
+			nextTest = s.tester.RecordTestResult(sni, currentTest, true)
+			s.logger.InfoWithRequestIDf(reqID, "[SUCCESS] Successful MITM for domain %s (url: %s) using %s",
+				sni, r.URL.String(), currentTest.GetTestTypeName())
+		} else if destIP != "" {
 			// Use IP-based lookup first
 			currentTest = s.tester.GetNextTestByIP(destIP)
 			nextTest = s.tester.RecordTestResult(destIP, currentTest, true)
@@ -892,6 +869,8 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 				hostWithoutPort, r.URL.String(), currentTest.GetTestTypeName())
 		}
 
+		appliedTest = currentTest
+
 		// If the next test is different, update the certificate function
 		if nextTest != currentTest {
 			s.logger.InfoWithRequestIDf(reqID, "[NEXT] Moving to next test for %s: %s", host, nextTest.GetTestTypeName())
@@ -899,7 +878,7 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle regular HTTP request (but over HTTPS)
-	s.handleRegularHTTP(w, r)
+	s.handleRegularHTTP(w, r, "https", &appliedTest)
 }
 
 // handleConnect handles CONNECT requests (for HTTPS)
@@ -910,47 +889,13 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Get client IP
 	clientIP := getClientIP(r)
 
-	// Print immediate debug information about the CONNECT request
-	fmt.Printf("[DEBUG-CONNECT-REQUEST] New CONNECT request from %s to %s (Proto: %s)\n",
+	// Log immediate debug information about the CONNECT request
+	s.logger.Debugf("[CONNECT-REQUEST] New CONNECT request from %s to %s (Proto: %s)",
 		clientIP, r.Host, r.Proto)
 
-	// Log all request headers for debugging
-	fmt.Printf("[DEBUG-CONNECT-HEADERS] CONNECT request headers from %s:\n", clientIP)
-	for name, values := range r.Header {
-		for _, value := range values {
-			fmt.Printf("[DEBUG-CONNECT-HEADERS]   %s: %s\n", name, value)
-		}
-	}
-
-	// Check if the client connection is a DebugConnection and if it's marked for direct tunnel mode
-	if hijacker, ok := w.(http.Hijacker); ok {
-		clientConn, _, hijackErr := hijacker.Hijack()
-		if hijackErr == nil {
-			if debugConn, ok := clientConn.(*DebugConnection); ok {
-				if debugConn.IsDirectTunnel() {
-					// This connection is already marked for direct tunnel mode
-					fmt.Printf("[DEBUG-CONNECT] Connection from %s is marked for direct tunnel mode, using direct tunnel\n",
-						clientIP)
-
-					// Get the original destination IP and port
-					origDestIP, origDestPort := debugConn.GetOriginalDestination()
-
-					if origDestIP != "" {
-						// Update the request host to use the original destination
-						r.Host = fmt.Sprintf("%s:%d", origDestIP, origDestPort)
-						fmt.Printf("[DEBUG-CONNECT] Using original destination %s for direct tunnel\n", r.Host)
-					}
-
-					// Use direct tunnel for this connection
-					s.handleDirectTunnel(w, r)
-					return
-				}
-			}
-
-			// If we're not using direct tunnel mode, close the connection so it can be hijacked again later
-			clientConn.Close()
-		}
-	}
+	// NOTE: Connection-level direct-tunnel checks are not done here. The
+	// connection must not be hijacked at this point; it is hijacked exactly
+	// once below for whichever mode is selected (direct tunnel or MITM).
 
 	// Extract the host and port
 	host := r.Host
@@ -1182,8 +1127,6 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// This is useful for transparent proxy mode
 	var originalDest *OriginalDestination
 	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
-		fmt.Printf("[DEBUG-CONNECT] Attempting to get original destination for connection from %s (Host: %s)\n",
-			clientIP, r.Host)
 
 		var err error
 		originalDest, err = GetOriginalDst(tcpConn)
@@ -1192,16 +1135,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			s.logger.InfoWithRequestIDf(reqID, "[ORIGINAL-DST] Original destination for client %s: %s (Host header: %s)",
 				clientIP, originalDest.HostPort, r.Host)
 
-			fmt.Printf("[DEBUG-CONNECT] Successfully got original destination: %s for client %s (Host header: %s)\n",
-				originalDest.HostPort, clientIP, r.Host)
-
 			// Always use the original destination IP:port from SO_ORIGINAL_DST
 			// This ensures we're connecting to the correct destination regardless of DNS
 			if originalDest.HostPort != r.Host {
 				s.logger.InfoWithRequestIDf(reqID, "[ORIGINAL-DST] Using original destination %s instead of Host header %s",
-					originalDest.HostPort, r.Host)
-
-				fmt.Printf("[DEBUG-CONNECT] Original destination %s differs from Host header %s - using original destination\n",
 					originalDest.HostPort, r.Host)
 
 				// Store the original hostname for logging purposes
@@ -1416,6 +1353,11 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Start proxying data between client and target
 	s.logger.Debugf("Starting to proxy data between client %s and target %s", clientIP, r.Host)
 
+	// Clear the setup deadlines; HTTPS tunnels are long-lived and must not be
+	// killed by the 30 second timeout that only covers the handshake/setup
+	_ = clientConn.SetDeadline(time.Time{})
+	_ = targetConn.SetDeadline(time.Time{})
+
 	// Extract domain without port for logging and test tracking
 	hostWithoutPort = r.Host
 	if host, _, err := net.SplitHostPort(r.Host); err == nil {
@@ -1472,11 +1414,58 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// handleRegularHTTP handles regular HTTP requests
-func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
+// newRegularTransport builds the shared transport used to relay decrypted
+// requests to their target servers. Connections are pooled across requests so
+// that a Transport is not created per request.
+func newRegularTransport() *http.Transport {
+	return &http.Transport{
+		// Accept any certificate presented by the server
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+		DisableCompression: true,
+		// Add more aggressive timeouts
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+}
+
+// handleRegularHTTP handles a client request that is already decrypted.
+// The scheme selects how the target request is re-issued: "https" when the
+// original connection was TLS (decrypted MITM traffic) and "http" for plain
+// HTTP proxying on the plain port. mitmTest is the certificate test the client
+// accepted for decrypted traffic and nil for plain HTTP.
+func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, scheme string, mitmTest *certificates.TestType) {
 	// Get client IP and host
 	clientIP := getClientIP(r)
 	host := r.Host
+
+	// One request ID shared by the request/response payloads and the event
+	reqID := s.logger.GetRequestID(clientIP, host)
+	started := time.Now()
+	evt := RequestEvent{
+		ReqID:    reqID,
+		ClientIP: clientIP,
+		Method:   r.Method,
+		Scheme:   scheme,
+		Host:     host,
+		Path:     r.URL.Path,
+		Query:    r.URL.RawQuery,
+		Saved:    s.savePayloads,
+	}
+	if mitmTest != nil {
+		evt.TestType = TestTypeKey(*mitmTest)
+	}
+	defer func() {
+		evt.DurationMs = float64(time.Since(started).Microseconds()) / 1000
+		s.publishRequest(evt)
+	}()
 
 	s.logger.Debugf("Handling request from %s to %s", clientIP, host)
 
@@ -1496,16 +1485,13 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
 			reqCopy.Body = io.NopCloser(bytes.NewReader(requestBodyCopy))
 		}
 
-		// Get a request ID for this connection
-		reqID := s.logger.GetRequestID(clientIP, host)
-
 		if err := s.payloadLogger.LogRequest(clientIP, host, &reqCopy, reqID); err != nil {
 			s.logger.Errorf("Failed to log request payload: %v", err)
 		}
 	}
 
 	// Construct a proper URL with scheme
-	targetURL := fmt.Sprintf("https://%s%s", host, r.URL.Path)
+	targetURL := fmt.Sprintf("%s://%s%s", scheme, host, r.URL.Path)
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
@@ -1523,6 +1509,8 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		s.logger.Errorf("Failed to create target request: %v", err)
+		evt.Error = err.Error()
+		evt.Status = http.StatusInternalServerError
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1534,24 +1522,9 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create HTTP client with transport that accepts any certificate
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // Accept any certificate presented by the server
-		},
-		DisableCompression: true,
-		// Add more aggressive timeouts
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-	}
-
+	// HTTP client with shared transport that accepts any certificate
 	client := &http.Client{
-		Transport: transport,
+		Transport: s.regularTransport,
 		Timeout:   30 * time.Second,
 		// Don't follow redirects automatically
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -1567,6 +1540,8 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
 	targetResp, err := client.Do(targetReq)
 	if err != nil {
 		s.logger.Errorf("Failed to send request to target server: %v", err)
+		evt.Error = err.Error()
+		evt.Status = http.StatusInternalServerError
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1578,6 +1553,8 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
 	responseBody, err := io.ReadAll(targetResp.Body)
 	if err != nil {
 		s.logger.Errorf("Failed to read response body: %v", err)
+		evt.Error = err.Error()
+		evt.Status = http.StatusInternalServerError
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1590,9 +1567,6 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
 		// Create a copy of the response for logging
 		respCopy := *targetResp
 		respCopy.Body = io.NopCloser(bytes.NewReader(responseBody))
-
-		// Get a request ID for this connection
-		reqID := s.logger.GetRequestID(clientIP, host)
 
 		if err := s.payloadLogger.LogResponse(clientIP, host, &respCopy, reqID); err != nil {
 			s.logger.Errorf("Failed to log response payload: %v", err)
@@ -1608,53 +1582,21 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Set response status code
 	w.WriteHeader(targetResp.StatusCode)
+	evt.Status = targetResp.StatusCode
+	evt.ReqBytes = len(requestBodyCopy)
+	evt.RespBytes = len(responseBody)
+	evt.ContentType = targetResp.Header.Get("Content-Type")
 
 	// Write response body
 	if _, err := w.Write(responseBody); err != nil {
 		s.logger.Errorf("Failed to write response body: %v", err)
 	}
 
-	// Log successful MITM with test type
-	var testType certificates.TestType
-
-	if s.autoTest {
-		// Extract the host without port
-		var hostWithoutPort string
-		if strings.Contains(host, ":") {
-			hostWithoutPort, _, _ = net.SplitHostPort(host)
-		} else {
-			hostWithoutPort = host
-		}
-
-		// Resolve the destination IP from the host
-		var destIP string
-
-		// Check if the host is already an IP address
-		if net.ParseIP(hostWithoutPort) != nil {
-			destIP = hostWithoutPort
-		} else {
-			// Resolve the domain to an IP address
-			ips, err := net.LookupIP(hostWithoutPort)
-			if err == nil && len(ips) > 0 {
-				// Use the first IP address
-				destIP = ips[0].String()
-			}
-		}
-
-		// Get the current test type from the tester
-		if destIP != "" {
-			testType = s.tester.GetNextTestByIP(destIP)
-			// This log message is redundant with the [SUCCESS] message above and can be removed
-		} else {
-			testType = s.tester.GetNextTest(hostWithoutPort)
-			// This log message is redundant with the [SUCCESS] message above and can be removed
-		}
-	} else {
-		testType = s.testType
-		// Get a request ID for this connection
-		reqID := s.logger.GetRequestID(clientIP, host)
+	// With a fixed test type every decrypted request is a successful MITM;
+	// in auto-test mode handleHTTPS already logged the success
+	if mitmTest != nil && !s.autoTest {
 		s.logger.InfoWithRequestIDf(reqID, "[SUCCESS] Successfully intercepted request from %s to %s (url: %s) (Test: %s)",
-			clientIP, host, r.URL.String(), testType.GetTestTypeName())
+			clientIP, host, r.URL.String(), mitmTest.GetTestTypeName())
 	}
 }
 
@@ -1683,26 +1625,23 @@ func (s *Server) trackConnection(clientIP string, isConnect bool) {
 
 // getClientIP gets the client IP address
 func getClientIP(r *http.Request) string {
-	// Check for X-Forwarded-For header
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// X-Forwarded-For can contain multiple IPs, use the first one
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
-		}
-	}
-
-	// Check for X-Real-IP header
-	if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-		return xrip
-	}
-
-	// Get IP from RemoteAddr
+	// Use the actual connection address. Headers such as X-Forwarded-For and
+	// X-Real-IP are fully client controlled, so trusting them would let any
+	// client spoof the IP that test results are keyed on.
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+// tlsServerName returns the SNI hostname of a decrypted request, or "" when
+// the client sent none (or sent an IP literal)
+func tlsServerName(r *http.Request) string {
+	if r.TLS == nil || r.TLS.ServerName == "" || isIPAddress(r.TLS.ServerName) {
+		return ""
+	}
+	return r.TLS.ServerName
 }
 
 // isIPAddress checks if a string is an IP address

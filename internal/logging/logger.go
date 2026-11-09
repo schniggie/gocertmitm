@@ -1,20 +1,27 @@
 package logging
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Broadcaster defines the interface for broadcasting messages
-type Broadcaster interface {
-	Broadcast(message []byte)
-}
+// Log levels reported to a Hook
+const (
+	LevelInfo    = "info"
+	LevelError   = "error"
+	LevelVerbose = "verbose"
+	LevelDebug   = "debug"
+)
+
+// Hook receives every line that is written to the log at an enabled level.
+// It is called synchronously and must not block or call back into the logger.
+type Hook func(level, reqID, msg string)
 
 // Logger provides logging functionality
 type Logger struct {
@@ -26,9 +33,26 @@ type Logger struct {
 	debug         bool
 	logFile       *os.File
 	nextReqID     uint64
-	reqIDMap      map[string]string // Maps clientIP:host to request ID
-	mu            sync.Mutex        // Mutex to protect concurrent access to reqIDMap and nextReqID
-	broadcaster   Broadcaster
+	mu            sync.Mutex // Mutex to protect nextReqID
+	hook          atomic.Pointer[Hook]
+}
+
+// SetHook installs (or, with nil, removes) a hook that observes log lines
+func (l *Logger) SetHook(h Hook) {
+	if h == nil {
+		l.hook.Store(nil)
+		return
+	}
+	l.hook.Store(&h)
+}
+
+// emit forwards a log line to the installed hook, if any
+func (l *Logger) emit(level, reqID, format string, v []interface{}) {
+	h := l.hook.Load()
+	if h == nil {
+		return
+	}
+	(*h)(level, reqID, fmt.Sprintf(format, v...))
 }
 
 // NewLogger creates a new logger
@@ -77,7 +101,6 @@ func NewLogger(logDir string, verbose bool, debug bool) (*Logger, error) {
 		debug:         debug,
 		logFile:       logFile,
 		nextReqID:     1,
-		reqIDMap:      make(map[string]string),
 	}, nil
 }
 
@@ -89,110 +112,65 @@ func (l *Logger) Close() error {
 	return nil
 }
 
-// SetBroadcaster sets the broadcaster for the logger
-func (l *Logger) SetBroadcaster(b Broadcaster) {
-	l.broadcaster = b
-}
-
 // Infof logs an info message
 func (l *Logger) Infof(format string, v ...interface{}) {
-	msg := fmt.Sprintf(format, v...)
-	l.infoLogger.Print(msg)
-	if l.broadcaster != nil {
-		logEntry := map[string]string{"type": "log", "message": msg}
-		jsonEntry, _ := json.Marshal(logEntry)
-		l.broadcaster.Broadcast(jsonEntry)
-	}
+	l.infoLogger.Printf(format, v...)
+	l.emit(LevelInfo, "", format, v)
 }
 
 // InfoWithRequestIDf logs an info message with a request ID
 func (l *Logger) InfoWithRequestIDf(reqID, format string, v ...interface{}) {
-	msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
-	l.infoLogger.Print(msg)
-	if l.broadcaster != nil {
-		logEntry := map[string]string{"type": "log", "message": msg}
-		jsonEntry, _ := json.Marshal(logEntry)
-		l.broadcaster.Broadcast(jsonEntry)
-	}
+	l.infoLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+	l.emit(LevelInfo, reqID, format, v)
 }
 
 // Errorf logs an error message
 func (l *Logger) Errorf(format string, v ...interface{}) {
-	msg := fmt.Sprintf(format, v...)
-	l.errorLogger.Print(msg)
-	if l.broadcaster != nil {
-		logEntry := map[string]string{"type": "log", "message": msg}
-		jsonEntry, _ := json.Marshal(logEntry)
-		l.broadcaster.Broadcast(jsonEntry)
-	}
+	l.errorLogger.Output(2, fmt.Sprintf(format, v...))
+	l.emit(LevelError, "", format, v)
 }
 
 // ErrorWithRequestIDf logs an error message with a request ID
 func (l *Logger) ErrorWithRequestIDf(reqID, format string, v ...interface{}) {
-	msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
-	l.errorLogger.Print(msg)
-	if l.broadcaster != nil {
-		logEntry := map[string]string{"type": "log", "message": msg}
-		jsonEntry, _ := json.Marshal(logEntry)
-		l.broadcaster.Broadcast(jsonEntry)
-	}
+	l.errorLogger.Output(2, fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...))
+	l.emit(LevelError, reqID, format, v)
 }
 
 // Verbosef logs a verbose message
 func (l *Logger) Verbosef(format string, v ...interface{}) {
 	if l.verbose {
-		msg := fmt.Sprintf(format, v...)
-		l.verboseLogger.Print(msg)
-		if l.broadcaster != nil {
-			logEntry := map[string]string{"type": "log", "message": msg}
-			jsonEntry, _ := json.Marshal(logEntry)
-			l.broadcaster.Broadcast(jsonEntry)
-		}
+		l.verboseLogger.Printf(format, v...)
+		l.emit(LevelVerbose, "", format, v)
 	}
 }
 
 // VerboseWithRequestIDf logs a verbose message with a request ID
 func (l *Logger) VerboseWithRequestIDf(reqID, format string, v ...interface{}) {
 	if l.verbose {
-		msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
-		l.verboseLogger.Print(msg)
-		if l.broadcaster != nil {
-			logEntry := map[string]string{"type": "log", "message": msg}
-			jsonEntry, _ := json.Marshal(logEntry)
-			l.broadcaster.Broadcast(jsonEntry)
-		}
+		l.verboseLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+		l.emit(LevelVerbose, reqID, format, v)
 	}
 }
 
 // Debugf logs a debug message
 func (l *Logger) Debugf(format string, v ...interface{}) {
 	if l.debug {
-		msg := fmt.Sprintf(format, v...)
-		l.debugLogger.Print(msg)
-		if l.broadcaster != nil {
-			logEntry := map[string]string{"type": "log", "message": msg}
-			jsonEntry, _ := json.Marshal(logEntry)
-			l.broadcaster.Broadcast(jsonEntry)
-		}
+		l.debugLogger.Output(2, fmt.Sprintf(format, v...))
+		l.emit(LevelDebug, "", format, v)
 	}
 }
 
 // DebugWithRequestIDf logs a debug message with a request ID
 func (l *Logger) DebugWithRequestIDf(reqID, format string, v ...interface{}) {
 	if l.debug {
-		msg := fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...)
-		l.debugLogger.Print(msg)
-		if l.broadcaster != nil {
-			logEntry := map[string]string{"type": "log", "message": msg}
-			jsonEntry, _ := json.Marshal(logEntry)
-			l.broadcaster.Broadcast(jsonEntry)
-		}
+		l.debugLogger.Output(2, fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...))
+		l.emit(LevelDebug, reqID, format, v)
 	}
 }
 
 // Fatalf logs a fatal message and exits
 func (l *Logger) Fatalf(format string, v ...interface{}) {
-	l.errorLogger.Printf(format, v...)
+	l.errorLogger.Output(2, fmt.Sprintf(format, v...))
 	os.Exit(1)
 }
 
@@ -240,29 +218,13 @@ func (l *Logger) LogConnectionSummary(clientIP, host string, testType string, ac
 		reqID, clientIP, host, testType, result)
 }
 
-// GetRequestID returns a request ID for a client IP and host
-// Always generates a new unique request ID for each call
+// GetRequestID returns a unique request ID for logging
 func (l *Logger) GetRequestID(clientIP, host string) string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	key := clientIP + ":" + host
-
-	// Generate a new request ID
 	reqID := fmt.Sprintf("REQ-%04X", l.nextReqID)
 	l.nextReqID++
 
-	// Store the request ID
-	l.reqIDMap[key] = reqID
-
 	return reqID
-}
-
-// ClearRequestID removes a request ID for a client IP and host
-func (l *Logger) ClearRequestID(clientIP, host string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	key := clientIP + ":" + host
-	delete(l.reqIDMap, key)
 }

@@ -7,9 +7,30 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
+
+// sanitizePathComponent makes a user-controlled string (such as the HTTP Host
+// header) safe to use as a directory name so it cannot traverse outside the
+// payload directory
+func sanitizePathComponent(name string) string {
+	if name == "" {
+		return "unknown-host"
+	}
+	s := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == 0 || r < 32 || r == 127 {
+			return '_'
+		}
+		return r
+	}, name)
+	switch s {
+	case ".", "..":
+		return "unknown-host"
+	}
+	return s
+}
 
 // PayloadLogger handles logging of HTTP request and response payloads
 type PayloadLogger struct {
@@ -20,7 +41,7 @@ type PayloadLogger struct {
 // NewPayloadLogger creates a new payload logger
 func NewPayloadLogger(baseDir string) (*PayloadLogger, error) {
 	// Create base directory if it doesn't exist
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
+	if err := os.MkdirAll(baseDir, 0700); err != nil {
 		return nil, fmt.Errorf("failed to create payload directory: %v", err)
 	}
 
@@ -35,8 +56,8 @@ func (p *PayloadLogger) LogRequest(clientIP, host string, req *http.Request, req
 	defer p.mu.Unlock()
 
 	// Create domain directory if it doesn't exist
-	domainDir := filepath.Join(p.baseDir, host)
-	if err := os.MkdirAll(domainDir, 0755); err != nil {
+	domainDir := filepath.Join(p.baseDir, sanitizePathComponent(host))
+	if err := os.MkdirAll(domainDir, 0700); err != nil {
 		return fmt.Errorf("failed to create domain directory: %v", err)
 	}
 
@@ -53,7 +74,7 @@ func (p *PayloadLogger) LogRequest(clientIP, host string, req *http.Request, req
 
 	// Create request metadata file
 	metadataPath := filepath.Join(domainDir, filenamePrefix+".meta")
-	metadataFile, err := os.Create(metadataPath)
+	metadataFile, err := os.OpenFile(metadataPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create request metadata file: %v", err)
 	}
@@ -89,7 +110,7 @@ func (p *PayloadLogger) LogRequest(clientIP, host string, req *http.Request, req
 
 		// Create body file
 		bodyPath := filepath.Join(domainDir, filenamePrefix+".body")
-		bodyFile, err := os.Create(bodyPath)
+		bodyFile, err := os.OpenFile(bodyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to create request body file: %v", err)
 		}
@@ -116,8 +137,8 @@ func (p *PayloadLogger) LogResponse(clientIP, host string, resp *http.Response, 
 	defer p.mu.Unlock()
 
 	// Create domain directory if it doesn't exist
-	domainDir := filepath.Join(p.baseDir, host)
-	if err := os.MkdirAll(domainDir, 0755); err != nil {
+	domainDir := filepath.Join(p.baseDir, sanitizePathComponent(host))
+	if err := os.MkdirAll(domainDir, 0700); err != nil {
 		return fmt.Errorf("failed to create domain directory: %v", err)
 	}
 
@@ -134,7 +155,7 @@ func (p *PayloadLogger) LogResponse(clientIP, host string, resp *http.Response, 
 
 	// Create response metadata file
 	metadataPath := filepath.Join(domainDir, filenamePrefix+".meta")
-	metadataFile, err := os.Create(metadataPath)
+	metadataFile, err := os.OpenFile(metadataPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create response metadata file: %v", err)
 	}
@@ -168,7 +189,7 @@ func (p *PayloadLogger) LogResponse(clientIP, host string, resp *http.Response, 
 
 		// Create body file
 		bodyPath := filepath.Join(domainDir, filenamePrefix+".body")
-		bodyFile, err := os.Create(bodyPath)
+		bodyFile, err := os.OpenFile(bodyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 		if err != nil {
 			return fmt.Errorf("failed to create response body file: %v", err)
 		}
