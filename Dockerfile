@@ -1,4 +1,4 @@
-FROM golang:1.20-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git make
@@ -19,10 +19,10 @@ COPY . .
 RUN make build-linux
 
 # Create final image
-FROM alpine:latest
+FROM alpine:3.24.2
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates iptables
+RUN apk add --no-cache ca-certificates iptables ip6tables
 
 # Set working directory
 WORKDIR /app

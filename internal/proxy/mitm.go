@@ -5,8 +5,6 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/gocertmitm/internal/certificates"
 )
 
 // copyData copies data between two connections with an inactivity timeout
@@ -46,24 +44,12 @@ func copyData(dst, src net.Conn, reqID string, domain string, server *Server) er
 				}
 				timer.Reset(inactivityTimeout)
 			case <-timer.C:
-				// Timeout occurred - close the connection and record as a test failure
+				// Timeout occurred - close the idle connection. An inactivity
+				// timeout is not evidence that a test type failed, so it must
+				// not be recorded as one
 				if server != nil && domain != "" && reqID != "" {
-					// Get the current test type for this domain
-					testType := server.tester.GetNextTest(domain)
-
-					// Record the timeout as a test failure if we're not already in direct tunnel mode
-					if testType != certificates.DirectTunnel {
-						server.logger.InfoWithRequestIDf(reqID, "[TIMEOUT] No activity for %s on MITM connection for %s - closing connection",
-							inactivityTimeout, domain)
-						server.logger.InfoWithRequestIDf(reqID, "[TIMEOUT] Recording timeout as a test failure for %s with test type %s",
-							domain, testType.GetTestTypeName())
-
-						// Record the failure and get the next test type
-						nextTest := server.tester.RecordTestResult(domain, testType, false)
-
-						server.logger.InfoWithRequestIDf(reqID, "[NEXT] Moving to next test for %s due to timeout: %s",
-							domain, nextTest.GetTestTypeName())
-					}
+					server.logger.DebugWithRequestIDf(reqID, "[TIMEOUT] No activity for %s on MITM connection for %s - closing connection",
+						inactivityTimeout, domain)
 				}
 
 				closeConn <- struct{}{}

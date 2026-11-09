@@ -1,3 +1,5 @@
+//go:build ignore
+
 package main
 
 import (
@@ -58,14 +60,14 @@ func main() {
 
 	// Try to get the original destination
 	fmt.Println("Attempting to get original destination using SO_ORIGINAL_DST...")
-	
+
 	// Create a buffer to hold the sockaddr structure
 	// The sockaddr_in structure is 16 bytes
 	buf := make([]byte, 16)
-	
+
 	// Get the size of the buffer
 	size := uint32(len(buf))
-	
+
 	// Call getsockopt
 	_, _, errno := syscall.Syscall6(
 		syscall.SYS_GETSOCKOPT,
@@ -76,12 +78,12 @@ func main() {
 		uintptr(unsafe.Pointer(&size)),
 		0,
 	)
-	
+
 	if errno != 0 {
 		fmt.Printf("Failed to get original destination: %v\n", errno)
 		os.Exit(1)
 	}
-	
+
 	// Parse the sockaddr structure
 	// The sockaddr_in structure is:
 	// struct sockaddr_in {
@@ -89,25 +91,25 @@ func main() {
 	//     in_port_t      sin_port;   /* port in network byte order */
 	//     struct in_addr sin_addr;   /* internet address */
 	// };
-	
+
 	// Print the raw data
 	fmt.Printf("Raw sockaddr data: %v\n", buf)
-	
+
 	// Extract the address family
 	family := uint16(buf[0]) | uint16(buf[1])<<8
 	fmt.Printf("Address family: %d\n", family)
-	
+
 	// Extract the port (network byte order)
 	port = int(buf[2])<<8 | int(buf[3])
 	fmt.Printf("Port: %d\n", port)
-	
+
 	// Extract the IP address
 	ip := net.IPv4(buf[4], buf[5], buf[6], buf[7])
 	fmt.Printf("IP address: %s\n", ip.String())
-	
+
 	// Print the original destination
 	fmt.Printf("Original destination: %s:%d\n", ip.String(), port)
-	
+
 	// Send a simple HTTP CONNECT request to test the proxy
 	fmt.Println("\nSending HTTP CONNECT request...")
 	request := fmt.Sprintf("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
@@ -116,7 +118,7 @@ func main() {
 		fmt.Printf("Failed to send request: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	// Read the response
 	fmt.Println("Reading response...")
 	buf = make([]byte, 1024)
@@ -125,8 +127,8 @@ func main() {
 		fmt.Printf("Failed to read response: %v\n", err)
 		os.Exit(1)
 	}
-	
+
 	fmt.Printf("Response (%d bytes):\n%s\n", n, string(buf[:n]))
-	
+
 	fmt.Println("Test completed successfully.")
 }

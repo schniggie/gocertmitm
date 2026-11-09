@@ -55,7 +55,28 @@ func NewManager(certDir string, logger Logger) (*Manager, error) {
 		manager.CA = ca
 	}
 
+	// Parse and validate the compromised eMudhra chain material upfront so
+	// any tampering or corruption fails fast at startup
+	emudhra, err := parseEmudhraChain()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load compromised eMudhra CA material: %v", err)
+	}
+	manager.emudhra = emudhra
+	manager.EmudhraChainMode = EmudhraChainBoth
+
 	return manager, nil
+}
+
+// SetEmudhraChainMode selects which compromised eMudhra chain variant is
+// served: "modern", "old" or "both" (default)
+func (m *Manager) SetEmudhraChainMode(mode string) error {
+	switch mode {
+	case EmudhraChainModern, EmudhraChainOld, EmudhraChainBoth:
+		m.EmudhraChainMode = mode
+	default:
+		return fmt.Errorf("invalid eMudhra chain mode %q (must be modern, old or both)", mode)
+	}
+	return nil
 }
 
 // loadCA loads the CA certificate and private key from disk
@@ -190,6 +211,14 @@ func (m *Manager) GetCertificate(domain string, testType TestType) (*tls.Certifi
 			tlsCert, err := tls.LoadX509KeyPair(certPath, keyPath)
 			if err == nil {
 				m.logger.Debugf("Successfully loaded saved certificate for %s", domain)
+
+				// Saved eMudhra chains may have been written with a different
+				// chain mode; rebuild the served chain from the current mode
+				if testType == Emudhra && len(tlsCert.Certificate) > 0 {
+					rebuilt := [][]byte{tlsCert.Certificate[0]}
+					rebuilt = append(rebuilt, m.emudhra.chainDER(m.EmudhraChainMode)...)
+					tlsCert.Certificate = rebuilt
+				}
 
 				// Parse the certificate to get the x509.Certificate
 				cert, err := x509.ParseCertificate(tlsCert.Certificate[0])

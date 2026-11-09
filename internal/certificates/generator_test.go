@@ -1,6 +1,8 @@
 package certificates
 
 import (
+	"crypto/x509"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,6 +60,7 @@ func TestGenerateCertificate(t *testing.T) {
 	manager := &Manager{
 		CertDir:   tempDir,
 		CertCache: make(map[string]*CertificatePair),
+		logger:    &noopTestLogger{},
 	}
 
 	// Generate CA
@@ -105,8 +108,9 @@ func TestGenerateCertificate(t *testing.T) {
 				t.Fatalf("Certificate for %s with test type %d has nil TLS certificate", domain, testType)
 			}
 
-			// Check if certificate is in cache
-			cachedCert, ok := manager.CertCache[domain]
+			// Check if certificate is in cache (keyed by domain and test type)
+			cacheKey := fmt.Sprintf("%s-%d", domain, testType)
+			cachedCert, ok := manager.CertCache[cacheKey]
 			if !ok {
 				t.Fatalf("Certificate for %s with test type %d is not in cache", domain, testType)
 			}
@@ -114,5 +118,45 @@ func TestGenerateCertificate(t *testing.T) {
 				t.Fatalf("Cached certificate for %s with test type %d is not the same as the generated certificate", domain, testType)
 			}
 		}
+	}
+}
+
+// TestGetCertificateKeysCacheByTestType guards against serving a certificate
+// generated for one test type when a different test type is requested
+func TestGetCertificateKeysCacheByTestType(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "certmitm-cachetest")
+	if err != nil {
+		t.Fatalf("Failed to create temporary directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	manager := &Manager{
+		CertDir:   tempDir,
+		CertCache: make(map[string]*CertificatePair),
+		logger:    &noopTestLogger{},
+	}
+
+	ca, err := manager.GenerateCA()
+	if err != nil {
+		t.Fatalf("Failed to generate CA: %v", err)
+	}
+	manager.CA = ca
+
+	if _, err := manager.GetCertificate("example.com", SelfSigned); err != nil {
+		t.Fatalf("Failed to get self-signed certificate: %v", err)
+	}
+
+	pair, err := manager.GetCertificate("example.com", ReplacedKey)
+	if err != nil {
+		t.Fatalf("Failed to get replaced-key certificate: %v", err)
+	}
+
+	// The replaced-key certificate is signed by the CA, not by itself
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatalf("Failed to parse replaced-key leaf certificate: %v", err)
+	}
+	if string(leaf.RawSubject) == string(leaf.RawIssuer) {
+		t.Errorf("GetCertificate(%q, ReplacedKey) returned the cached self-signed certificate", "example.com")
 	}
 }

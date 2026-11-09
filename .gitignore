@@ -33,6 +33,8 @@ go.work
 *.der
 *.p12
 *.pfx
+# Embedded (public) eMudhra chain assets, required for go:embed
+!internal/certificates/assets/*.pem
 
 # Testing data directories
 /payloads/

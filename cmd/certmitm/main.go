@@ -23,12 +23,11 @@ var (
 	logDir       = flag.String("logdir", "./logs", "Directory to store logs")
 	payloadDir   = flag.String("payloaddir", "./payloads", "Directory to store request/response payloads")
 	savePayloads = flag.Bool("savepayloads", true, "Enable saving of request/response payloads")
-	testType     = flag.String("testtype", "self-signed", "Test type: self-signed, replaced-key, real-cert, real-ca")
+	testType     = flag.String("testtype", "self-signed", "Test type: self-signed, replaced-key, real-cert, real-ca, emudhra")
 	autoTest     = flag.Bool("autotest", true, "Automatically test all methods for each domain")
 	retrySeconds = flag.Int("retryseconds", 86400, "Time in seconds to wait before retesting a domain (default: 24 hours)")
 	maxAttempts  = flag.Int("maxattempts", 1, "Maximum number of attempts for each test type before moving to the next test")
-	webui        = flag.Bool("webui", false, "Enable the web UI")
-	webuiAddr    = flag.String("webui-addr", ":8081", "Address to listen on for the web UI")
+	emudhraChain = flag.String("emudhra-chain", "both", "Compromised eMudhra chain to serve: modern, old or both")
 )
 
 func main() {
@@ -50,14 +49,17 @@ func main() {
 		logger.Fatalf("Failed to initialize certificate manager: %v", err)
 	}
 
+	// Select the compromised eMudhra chain variant to serve
+	if err := certManager.SetEmudhraChainMode(*emudhraChain); err != nil {
+		logger.Fatalf("Invalid eMudhra chain mode: %v", err)
+	}
+	logger.Infof("eMudhra chain mode: %s", *emudhraChain)
+
 	// Initialize proxy server
 	proxyServer, err := proxy.NewServer(*listenAddr, *listenAddrs, certManager, logger, time.Duration(*retrySeconds)*time.Second)
 	if err != nil {
 		logger.Fatalf("Failed to initialize proxy server: %v", err)
 	}
-
-	// Set the broadcaster on the logger
-	logger.SetBroadcaster(proxyServer)
 
 	// Set the max attempts for each test type
 	proxyServer.SetMaxAttempts(*maxAttempts)
@@ -85,6 +87,8 @@ func main() {
 		selectedTestType = certificates.RealCertificate
 	case "real-ca":
 		selectedTestType = certificates.RealCertificateAsCA
+	case "emudhra":
+		selectedTestType = certificates.Emudhra
 	default:
 		logger.Fatalf("Invalid test type: %s", *testType)
 	}
@@ -108,16 +112,6 @@ func main() {
 			logger.Fatalf("Proxy server error: %v", err)
 		}
 	}()
-
-	// Start web UI if enabled
-	if *webui {
-		go func() {
-			logger.Infof("Starting web UI on %s", *webuiAddr)
-			if err := proxyServer.StartWebUI(*webuiAddr); err != nil {
-				logger.Fatalf("Web UI error: %v", err)
-			}
-		}()
-	}
 
 	logger.Infof("CertMITM proxy started, HTTP on %s, HTTPS on %s", *listenAddr, *listenAddrs)
 	logger.Infof("Press Ctrl+C to stop")
