@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gocertmitm/internal/certificates"
@@ -54,6 +55,7 @@ type Server struct {
 	startTime           time.Time                                 // When the server was created
 	events              *events.Bus                               // Optional observer bus (web UI)
 	stats               serverCounters                            // Monotonic counters for observers
+	tlsListener         atomic.Pointer[tlsHandshakeListener]      // HTTPS handshake listener; CONNECT tunnels are injected here
 }
 
 // NewServer creates a new proxy server
@@ -290,27 +292,27 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to create HTTPS listener: %v", err)
 	}
 
-	// Start HTTP server with debug listener
-	go func() {
-		s.logger.Infof("Starting HTTP proxy on %s", s.httpAddr)
-		s.logger.Infof("Starting HTTP proxy on %s", s.httpAddr)
-		if err := s.httpServer.Serve(httpListener); err != nil && err != http.ErrServerClosed {
-			s.logger.Errorf("HTTP server error: %v", err)
-			s.logger.Errorf("HTTP server error: %v", err)
-		}
-	}()
-
 	// Create a direct tunnel listener that wraps the HTTPS listener
 	directTunnelListener := &DirectTunnelListener{
 		Listener: httpsListener,
 		server:   s,
 	}
 
-	// Start HTTPS server with handshake listener. The TLS handshake is
-	// performed by the listener so failures are recorded structurally instead
-	// of being scraped from the HTTP server's error log
+	// The HTTPS handshake listener performs the TLS handshake itself so
+	// failures are recorded structurally instead of being scraped from the
+	// HTTP server's error log. It is published before the HTTP proxy starts
+	// because intercepted CONNECT tunnels are injected into it.
 	tlsListener := newTLSHandshakeListener(directTunnelListener, s)
-	s.logger.Infof("Starting HTTPS proxy on %s", s.httpsAddr)
+	s.tlsListener.Store(tlsListener)
+
+	// Start HTTP server with debug listener
+	go func() {
+		s.logger.Infof("Starting HTTP proxy on %s", s.httpAddr)
+		if err := s.httpServer.Serve(httpListener); err != nil && err != http.ErrServerClosed {
+			s.logger.Errorf("HTTP server error: %v", err)
+		}
+	}()
+
 	s.logger.Infof("Starting HTTPS proxy on %s", s.httpsAddr)
 	if err := s.httpsServer.Serve(tlsListener); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("HTTPS server error: %v", err)
@@ -321,6 +323,9 @@ func (s *Server) Start() error {
 
 // Stop stops the proxy server
 func (s *Server) Stop() error {
+	// Persist pending test results and stop the background flush loop
+	defer s.tester.Close()
+
 	// Stop HTTP server
 	if err := s.httpServer.Close(); err != nil {
 		s.logger.Errorf("Error stopping HTTP server: %v", err)
@@ -883,9 +888,6 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 
 // handleConnect handles CONNECT requests (for HTTPS)
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
-	// Declare variables we'll use throughout the function
-	var err error
-
 	// Get client IP
 	clientIP := getClientIP(r)
 
@@ -1096,322 +1098,15 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log CONNECT request with test type
-	testType := s.testType
-	if s.autoTest {
-		testType = s.tester.GetNextTest(host)
-	}
-
 	if isMQTT {
-		s.logger.InfoWithRequestIDf(reqID, "[MQTT] CONNECT request for %s from %s (Test: %s)", r.Host, clientIP, testType.GetTestTypeName())
+		s.logger.InfoWithRequestIDf(reqID, "[MQTT] CONNECT request for %s from %s", r.Host, clientIP)
 	} else {
-		s.logger.InfoWithRequestIDf(reqID, "[CONNECT] Request for %s from %s (Test: %s)", r.Host, clientIP, testType.GetTestTypeName())
+		s.logger.InfoWithRequestIDf(reqID, "[CONNECT] Request for %s from %s", r.Host, clientIP)
 	}
 
-	// Hijack the connection
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		s.logger.Errorf("Hijacking not supported for client %s", clientIP)
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-
-	clientConn, _, hijackErr := hijacker.Hijack()
-	if hijackErr != nil {
-		s.logger.Errorf("Failed to hijack connection from %s: %v", clientIP, hijackErr)
-		http.Error(w, hijackErr.Error(), http.StatusServiceUnavailable)
-		return
-	}
-
-	// Try to get the original destination using SO_ORIGINAL_DST
-	// This is useful for transparent proxy mode
-	var originalDest *OriginalDestination
-	if tcpConn, ok := clientConn.(*net.TCPConn); ok {
-
-		var err error
-		originalDest, err = GetOriginalDst(tcpConn)
-		if err == nil {
-			// Log both the hostname from the request and the original destination IP
-			s.logger.InfoWithRequestIDf(reqID, "[ORIGINAL-DST] Original destination for client %s: %s (Host header: %s)",
-				clientIP, originalDest.HostPort, r.Host)
-
-			// Always use the original destination IP:port from SO_ORIGINAL_DST
-			// This ensures we're connecting to the correct destination regardless of DNS
-			if originalDest.HostPort != r.Host {
-				s.logger.InfoWithRequestIDf(reqID, "[ORIGINAL-DST] Using original destination %s instead of Host header %s",
-					originalDest.HostPort, r.Host)
-
-				// Store the original hostname for logging purposes
-				originalHostname := r.Host
-
-				// Update the request host to use the original destination IP:port
-				r.Host = originalDest.HostPort
-
-				// Extract IP without port for domain tracking
-				hostWithoutPort := originalDest.IPString
-
-				// Add to recent domains list
-				s.AddRecentDomain(hostWithoutPort)
-
-				// Update the request ID with the new host but include the original hostname in logs
-				reqID = s.logger.GetRequestID(clientIP, hostWithoutPort)
-				s.logger.InfoWithRequestIDf(reqID, "[ORIGINAL-DST] Request for hostname %s directed to IP %s",
-					originalHostname, originalDest.IPString)
-
-				s.logger.DebugWithRequestIDf(reqID, "[CONNECT] Updated request host to %s (original hostname: %s)",
-					r.Host, originalHostname)
-			} else {
-				s.logger.DebugWithRequestIDf(reqID, "[CONNECT] Original destination matches Host header: %s", r.Host)
-			}
-		} else {
-			s.logger.DebugWithRequestIDf(reqID, "[ORIGINAL-DST] Failed to get original destination: %v", err)
-			s.logger.DebugWithRequestIDf(reqID, "[CONNECT] Failed to get original destination for client %s: %v",
-				clientIP, err)
-		}
-	} else {
-		s.logger.DebugWithRequestIDf(reqID, "[CONNECT] Connection is not a TCP connection, cannot get original destination")
-	}
-
-	// Store the destination information for this client IP
-	// This will help us identify the destination for non-TLS connections
-	s.clientDestMu.Lock()
-	s.clientDestinations[clientIP] = r.Host
-	s.logger.DebugWithRequestIDf(reqID, "[DEST] Stored destination %s for client %s", r.Host, clientIP)
-	s.clientDestMu.Unlock()
-
-	// Set a deadline for the client connection
-	if err := clientConn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		s.logger.Errorf("Failed to set deadline for client connection: %v", err)
-	}
-
-	// Connect to the target server
-	s.logger.Debugf("Connecting to target server: %s", r.Host)
-
-	// Variable to hold the connection to the target server
-	var targetConn net.Conn
-
-	// Check if this is an MQTT connection based on the URL format or hostname
-	isMQTTConn := strings.HasPrefix(strings.ToLower(r.Host), "ssl://") ||
-		strings.HasPrefix(strings.ToLower(r.Host), "mqtts://") ||
-		strings.Contains(strings.ToLower(r.Host), "mqtt")
-
-	// For HTTPS connections or MQTT over SSL, we need to use TLS with InsecureSkipVerify
-	if strings.HasSuffix(r.Host, ":443") || strings.Contains(r.Host, ":443/") || isMQTTConn {
-		if isMQTTConn {
-			s.logger.Debugf("Using TLS connection with InsecureSkipVerify for MQTT over SSL: %s", r.Host)
-		} else {
-			s.logger.Debugf("Using TLS connection with InsecureSkipVerify for HTTPS: %s", r.Host)
-		}
-
-		// First establish a TCP connection
-		tcpConn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
-		if err != nil {
-			s.logger.Errorf("Failed to connect to target %s: %v", r.Host, err)
-			clientConn.Close()
-			return
-		}
-
-		// Then upgrade to TLS with InsecureSkipVerify
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: true,
-		}
-
-		// Extract hostname without port for ServerName
-		host, _, err := net.SplitHostPort(r.Host)
-		if err == nil {
-			tlsConfig.ServerName = host
-		}
-
-		tlsConn := tls.Client(tcpConn, tlsConfig)
-		if err := tlsConn.Handshake(); err != nil {
-			if isMQTTConn {
-				s.logger.InfoWithRequestIDf(reqID, "[MQTT] TLS handshake failed for MQTT connection to %s: %v - recording as test failure", r.Host, err)
-
-				// Get the current test type for this domain
-				testType := s.tester.GetNextTest(hostWithoutPort)
-
-				// Record the handshake failure
-				s.logger.InfoWithRequestIDf(reqID, "[TLS] Handshake error from %s for %s with test type %s",
-					clientIP, hostWithoutPort, testType.GetTestTypeName())
-
-				// Record the failure and get the next test type
-				nextTest := s.RecordFailedHandshake(hostWithoutPort, testType, reqID)
-
-				s.logger.InfoWithRequestIDf(reqID, "[NEXT] Moving to next test for %s: %s", hostWithoutPort, nextTest.GetTestTypeName())
-
-				// If we've tried all tests, use direct tunnel
-				if nextTest == certificates.DirectTunnel {
-					s.logger.InfoWithRequestIDf(reqID, "[MQTT] All tests failed for MQTT connection to %s - falling back to direct tunnel", r.Host)
-
-					// For MQTT connections, if all tests fail, fall back to direct tunnel
-					// Close the TLS connection
-					tcpConn.Close()
-
-					// Add this domain to the direct tunnel map for future connections
-					s.directTunnelMu.Lock()
-					s.directTunnelDomains[hostWithoutPort] = true
-					if destIP != "" {
-						s.directTunnelDomains[destIP] = true
-					}
-					s.directTunnelMu.Unlock()
-
-					// Use direct tunnel for this connection
-					s.handleDirectTunnel(w, r)
-					return
-				} else {
-					// Try again with the next test type
-					s.logger.InfoWithRequestIDf(reqID, "[MQTT] Trying next test type %s for %s", nextTest.GetTestTypeName(), hostWithoutPort)
-					tcpConn.Close()
-					clientConn.Close()
-					return
-				}
-			} else {
-				s.logger.Errorf("TLS handshake failed with %s: %v", r.Host, err)
-				tcpConn.Close()
-				clientConn.Close()
-				return
-			}
-		}
-
-		// For MQTT connections, we need special handling
-		if isMQTTConn {
-			s.logger.InfoWithRequestIDf(reqID, "[MQTT] TLS handshake succeeded for MQTT connection to %s - connection established", r.Host)
-			s.logger.InfoWithRequestIDf(reqID, "[MQTT-ALERT] *** MQTT CONNECTION ESTABLISHED: %s - Will force test failure in 5 seconds ***", hostWithoutPort)
-
-			// Capture variables for the goroutine to avoid race conditions
-			domainForGoroutine := hostWithoutPort
-			reqIDForGoroutine := reqID
-
-			// Start a goroutine to force a test failure after a short delay
-			// This is because MQTT connections are persistent and may not fail naturally
-			go func(domain, reqID string) {
-				// Log that we're starting the goroutine
-				s.logger.InfoWithRequestIDf(reqID, "[MQTT-GOROUTINE] Starting goroutine to handle MQTT connection to %s", domain)
-
-				// Wait a short time to let the connection establish fully
-				time.Sleep(5 * time.Second)
-
-				// Log that we're waking up after the sleep
-				s.logger.InfoWithRequestIDf(reqID, "[MQTT-GOROUTINE] Waking up after 5 second sleep for %s", domain)
-
-				// Get the current test type for this domain
-				testType := s.tester.GetNextTest(domain)
-
-				// Log the current test type
-				s.logger.InfoWithRequestIDf(reqID, "[MQTT-GOROUTINE] Current test type for %s: %s", domain, testType.GetTestTypeName())
-
-				// If we're not already using direct tunnel, record this as a failure to move to the next test
-				if testType != certificates.DirectTunnel {
-					s.logger.InfoWithRequestIDf(reqID, "[MQTT-GOROUTINE] MQTT connection to %s has been established for 5 seconds - recording as test failure to move to next test", domain)
-
-					// Record the failure and get the next test type
-					nextTest := s.tester.RecordTestResult(domain, testType, false)
-
-					s.logger.InfoWithRequestIDf(reqID, "[MQTT-GOROUTINE] Moving to next test for %s: %s", domain, nextTest.GetTestTypeName())
-
-					// Log the domain status after recording the failure
-					domainStatus := s.tester.GetTestStatus(domain)
-					if domainStatus != nil {
-						s.logger.InfoWithRequestIDf(reqID, "[MQTT-GOROUTINE] After failure - Domain %s status: CurrentTestIndex=%d, TestsCompleted=%v, SuccessfulTestSet=%v",
-							domain, domainStatus.CurrentTestIndex, domainStatus.TestsCompleted, domainStatus.SuccessfulTestSet)
-					}
-				} else {
-					s.logger.InfoWithRequestIDf(reqID, "[MQTT-GOROUTINE] Domain %s is already using direct tunnel, not recording failure", domain)
-				}
-			}(domainForGoroutine, reqIDForGoroutine)
-		}
-
-		targetConn = tlsConn
-	} else {
-		// For non-HTTPS connections, use regular TCP
-		// Note: We now handle MQTT connections with TLS above, so this is only for non-TLS connections
-		s.logger.Debugf("Using direct TCP connection for non-HTTPS: %s", r.Host)
-
-		targetConn, err = net.DialTimeout("tcp", r.Host, 10*time.Second)
-		if err != nil {
-			s.logger.Errorf("Failed to connect to target %s: %v", r.Host, err)
-			clientConn.Close()
-			return
-		}
-	}
-
-	// Set a deadline for the target connection
-	if err := targetConn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		s.logger.Errorf("Failed to set deadline for target connection: %v", err)
-	}
-
-	// Respond to the client that the connection is established
-	s.logger.Debugf("Sending 200 Connection established to client %s", clientIP)
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
-	if err != nil {
-		s.logger.Errorf("Failed to write to client %s: %v", clientIP, err)
-		clientConn.Close()
-		targetConn.Close()
-		return
-	}
-
-	// Start proxying data between client and target
-	s.logger.Debugf("Starting to proxy data between client %s and target %s", clientIP, r.Host)
-
-	// Clear the setup deadlines; HTTPS tunnels are long-lived and must not be
-	// killed by the 30 second timeout that only covers the handshake/setup
-	_ = clientConn.SetDeadline(time.Time{})
-	_ = targetConn.SetDeadline(time.Time{})
-
-	// Extract domain without port for logging and test tracking
-	hostWithoutPort = r.Host
-	if host, _, err := net.SplitHostPort(r.Host); err == nil {
-		hostWithoutPort = host
-	}
-
-	// Get a request ID for this connection
-	reqID = s.logger.GetRequestID(clientIP, hostWithoutPort)
-
-	// If this is a DebugConnection, set the domain and client IP
-	if debugConn, ok := clientConn.(*DebugConnection); ok {
-		debugConn.SetDomain(hostWithoutPort)
-		debugConn.SetClientIP(clientIP)
-		debugConn.SetRequestID(reqID)
-
-		s.logger.DebugWithRequestIDf(reqID, "[CONNECT] Set domain %s and client IP %s on connection %s",
-			hostWithoutPort, clientIP, clientConn.RemoteAddr())
-	}
-
-	go func() {
-		defer clientConn.Close()
-		defer targetConn.Close()
-
-		// Copy data from target to client
-		err := copyData(targetConn, clientConn, reqID, hostWithoutPort, s)
-
-		// Check for connection reset
-		if err != nil && (strings.Contains(err.Error(), "connection reset by peer") ||
-			strings.Contains(err.Error(), "broken pipe") ||
-			strings.Contains(err.Error(), "write: broken pipe")) {
-			// Handle connection reset as a test failure
-			s.HandleConnectionReset(clientIP, hostWithoutPort)
-		}
-
-		s.logger.DebugWithRequestIDf(reqID, "Finished proxying data from target %s to client %s", r.Host, clientIP)
-	}()
-
-	go func() {
-		defer clientConn.Close()
-		defer targetConn.Close()
-
-		// Copy data from client to target
-		err := copyData(clientConn, targetConn, reqID, hostWithoutPort, s)
-
-		// Check for connection reset
-		if err != nil && (strings.Contains(err.Error(), "connection reset by peer") ||
-			strings.Contains(err.Error(), "broken pipe") ||
-			strings.Contains(err.Error(), "write: broken pipe")) {
-			// Handle connection reset as a test failure
-			s.HandleConnectionReset(clientIP, hostWithoutPort)
-		}
-
-		s.logger.DebugWithRequestIDf(reqID, "Finished proxying data from client %s to target %s", clientIP, r.Host)
-	}()
+	// The certificate under test is chosen during the TLS handshake (from the
+	// SNI), exactly as for transparently redirected connections
+	s.interceptConnect(w, r, reqID, clientIP)
 }
 
 // newRegularTransport builds the shared transport used to relay decrypted

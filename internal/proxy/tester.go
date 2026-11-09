@@ -61,6 +61,7 @@ type Tester struct {
 	maxAttempts  int  // Maximum number of attempts for each test type
 	dirty        bool // Set when the in-memory state has unsaved changes
 	stopFlush    chan struct{}
+	closeOnce    sync.Once
 	onChange     func(DomainView) // Optional observer for state changes
 }
 
@@ -95,6 +96,12 @@ func NewTesterWithRetryPeriod(logger *logging.Logger, initialTestType certificat
 
 	// Create the JSON file path
 	jsonFilePath := filepath.Join("./data", "domain_results.json")
+
+	// Pin the location at startup so a later working-directory change cannot
+	// redirect where results are persisted
+	if abs, err := filepath.Abs(jsonFilePath); err == nil {
+		jsonFilePath = abs
+	}
 
 	// Create the data directory if it doesn't exist
 	os.MkdirAll(filepath.Dir(jsonFilePath), 0755)
@@ -712,6 +719,13 @@ func (t *Tester) flushLoop() {
 			t.saveIfDirty()
 		}
 	}
+}
+
+// Close stops the background flush loop and persists any unsaved results.
+// It is safe to call more than once.
+func (t *Tester) Close() {
+	t.closeOnce.Do(func() { close(t.stopFlush) })
+	t.saveIfDirty()
 }
 
 // saveIfDirty writes the JSON file once per change batch
