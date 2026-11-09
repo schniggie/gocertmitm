@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gocertmitm/internal/certificates"
+	"github.com/gocertmitm/internal/events"
 	"github.com/gocertmitm/internal/logging"
 )
 
@@ -49,6 +50,10 @@ type Server struct {
 	recentDomains       []string                                  // Track recently accessed domains
 	recentDomainsMu     sync.Mutex                                // Mutex for recentDomains
 	regularTransport    *http.Transport                           // Shared transport for regular HTTP requests
+	payloadDir          string                                    // Directory payloads are written to
+	startTime           time.Time                                 // When the server was created
+	events              *events.Bus                               // Optional observer bus (web UI)
+	stats               serverCounters                            // Monotonic counters for observers
 }
 
 // NewServer creates a new proxy server
@@ -85,6 +90,8 @@ func NewServer(httpAddr, httpsAddr string, certManager *certificates.Manager, lo
 		directTunnelDomains: make(map[string]bool),
 		clientDestinations:  make(map[string]string), // Track client IP to destination mapping
 		recentDomains:       make([]string, 0, 10),   // Track up to 10 recent domains
+		payloadDir:          "./payloads",
+		startTime:           time.Now(),
 	}
 
 	// Create HTTP server
@@ -635,6 +642,7 @@ func (s *Server) SetPayloadDir(dir string) error {
 		return fmt.Errorf("failed to create payload logger: %v", err)
 	}
 	s.payloadLogger = payloadLogger
+	s.payloadDir = dir
 	return nil
 }
 
@@ -760,7 +768,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle regular HTTP request
-	s.handleRegularHTTP(w, r, "http")
+	s.handleRegularHTTP(w, r, "http", nil)
 }
 
 // handleHTTPS handles HTTPS requests
@@ -827,6 +835,9 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 	s.trackConnection(clientIP, true)
 	defer s.trackConnection(clientIP, false)
 
+	// The certificate test the client accepted to get here
+	appliedTest := s.testType
+
 	// If auto-testing is enabled, record a successful test
 	if s.autoTest {
 		// Record successful test for this domain or IP
@@ -858,6 +869,8 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 				hostWithoutPort, r.URL.String(), currentTest.GetTestTypeName())
 		}
 
+		appliedTest = currentTest
+
 		// If the next test is different, update the certificate function
 		if nextTest != currentTest {
 			s.logger.InfoWithRequestIDf(reqID, "[NEXT] Moving to next test for %s: %s", host, nextTest.GetTestTypeName())
@@ -865,7 +878,7 @@ func (s *Server) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle regular HTTP request (but over HTTPS)
-	s.handleRegularHTTP(w, r, "https")
+	s.handleRegularHTTP(w, r, "https", &appliedTest)
 }
 
 // handleConnect handles CONNECT requests (for HTTPS)
@@ -1426,11 +1439,33 @@ func newRegularTransport() *http.Transport {
 // handleRegularHTTP handles a client request that is already decrypted.
 // The scheme selects how the target request is re-issued: "https" when the
 // original connection was TLS (decrypted MITM traffic) and "http" for plain
-// HTTP proxying on the plain port.
-func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, scheme string) {
+// HTTP proxying on the plain port. mitmTest is the certificate test the client
+// accepted for decrypted traffic and nil for plain HTTP.
+func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, scheme string, mitmTest *certificates.TestType) {
 	// Get client IP and host
 	clientIP := getClientIP(r)
 	host := r.Host
+
+	// One request ID shared by the request/response payloads and the event
+	reqID := s.logger.GetRequestID(clientIP, host)
+	started := time.Now()
+	evt := RequestEvent{
+		ReqID:    reqID,
+		ClientIP: clientIP,
+		Method:   r.Method,
+		Scheme:   scheme,
+		Host:     host,
+		Path:     r.URL.Path,
+		Query:    r.URL.RawQuery,
+		Saved:    s.savePayloads,
+	}
+	if mitmTest != nil {
+		evt.TestType = TestTypeKey(*mitmTest)
+	}
+	defer func() {
+		evt.DurationMs = float64(time.Since(started).Microseconds()) / 1000
+		s.publishRequest(evt)
+	}()
 
 	s.logger.Debugf("Handling request from %s to %s", clientIP, host)
 
@@ -1449,9 +1484,6 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, schem
 		if requestBodyCopy != nil {
 			reqCopy.Body = io.NopCloser(bytes.NewReader(requestBodyCopy))
 		}
-
-		// Get a request ID for this connection
-		reqID := s.logger.GetRequestID(clientIP, host)
 
 		if err := s.payloadLogger.LogRequest(clientIP, host, &reqCopy, reqID); err != nil {
 			s.logger.Errorf("Failed to log request payload: %v", err)
@@ -1477,6 +1509,8 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, schem
 
 	if err != nil {
 		s.logger.Errorf("Failed to create target request: %v", err)
+		evt.Error = err.Error()
+		evt.Status = http.StatusInternalServerError
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1506,6 +1540,8 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, schem
 	targetResp, err := client.Do(targetReq)
 	if err != nil {
 		s.logger.Errorf("Failed to send request to target server: %v", err)
+		evt.Error = err.Error()
+		evt.Status = http.StatusInternalServerError
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1517,6 +1553,8 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, schem
 	responseBody, err := io.ReadAll(targetResp.Body)
 	if err != nil {
 		s.logger.Errorf("Failed to read response body: %v", err)
+		evt.Error = err.Error()
+		evt.Status = http.StatusInternalServerError
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1529,9 +1567,6 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, schem
 		// Create a copy of the response for logging
 		respCopy := *targetResp
 		respCopy.Body = io.NopCloser(bytes.NewReader(responseBody))
-
-		// Get a request ID for this connection
-		reqID := s.logger.GetRequestID(clientIP, host)
 
 		if err := s.payloadLogger.LogResponse(clientIP, host, &respCopy, reqID); err != nil {
 			s.logger.Errorf("Failed to log response payload: %v", err)
@@ -1547,53 +1582,21 @@ func (s *Server) handleRegularHTTP(w http.ResponseWriter, r *http.Request, schem
 
 	// Set response status code
 	w.WriteHeader(targetResp.StatusCode)
+	evt.Status = targetResp.StatusCode
+	evt.ReqBytes = len(requestBodyCopy)
+	evt.RespBytes = len(responseBody)
+	evt.ContentType = targetResp.Header.Get("Content-Type")
 
 	// Write response body
 	if _, err := w.Write(responseBody); err != nil {
 		s.logger.Errorf("Failed to write response body: %v", err)
 	}
 
-	// Log successful MITM with test type
-	var testType certificates.TestType
-
-	if s.autoTest {
-		// Extract the host without port
-		var hostWithoutPort string
-		if strings.Contains(host, ":") {
-			hostWithoutPort, _, _ = net.SplitHostPort(host)
-		} else {
-			hostWithoutPort = host
-		}
-
-		// Resolve the destination IP from the host
-		var destIP string
-
-		// Check if the host is already an IP address
-		if net.ParseIP(hostWithoutPort) != nil {
-			destIP = hostWithoutPort
-		} else {
-			// Resolve the domain to an IP address
-			ips, err := net.LookupIP(hostWithoutPort)
-			if err == nil && len(ips) > 0 {
-				// Use the first IP address
-				destIP = ips[0].String()
-			}
-		}
-
-		// Get the current test type from the tester
-		if destIP != "" {
-			testType = s.tester.GetNextTestByIP(destIP)
-			// This log message is redundant with the [SUCCESS] message above and can be removed
-		} else {
-			testType = s.tester.GetNextTest(hostWithoutPort)
-			// This log message is redundant with the [SUCCESS] message above and can be removed
-		}
-	} else {
-		testType = s.testType
-		// Get a request ID for this connection
-		reqID := s.logger.GetRequestID(clientIP, host)
+	// With a fixed test type every decrypted request is a successful MITM;
+	// in auto-test mode handleHTTPS already logged the success
+	if mitmTest != nil && !s.autoTest {
 		s.logger.InfoWithRequestIDf(reqID, "[SUCCESS] Successfully intercepted request from %s to %s (url: %s) (Test: %s)",
-			clientIP, host, r.URL.String(), testType.GetTestTypeName())
+			clientIP, host, r.URL.String(), mitmTest.GetTestTypeName())
 	}
 }
 

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>GoCertMITM</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" id="brand-mark"></div>
+      <span>GoCertMITM</span>
+    </div>
+    <nav class="nav" id="nav" aria-label="Sections">
+      <a href="#/overview" data-view="overview">Overview</a>
+      <a href="#/domains" data-view="domains">Domains<span class="count" id="vuln-count" hidden></span></a>
+      <a href="#/traffic" data-view="traffic">Traffic</a>
+      <a href="#/payloads" data-view="payloads">Payloads</a>
+      <a href="#/logs" data-view="logs">Logs</a>
+      <a href="#/setup" data-view="setup">Setup</a>
+    </nav>
+    <div class="topbar-right">
+      <div class="live" id="live" role="status" aria-live="polite"><span class="label">Connecting…</span></div>
+      <button class="btn icon" id="theme-toggle" type="button" title="Toggle theme" aria-label="Toggle theme"></button>
+      <form method="post" action="/logout" id="logout-form">
+        <button class="btn sm" type="submit">Sign out</button>
+      </form>
+    </div>
+  </header>
+
+  <main id="view" tabindex="-1"></main>
+
+  <div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <aside class="drawer" id="drawer" aria-modal="true" role="dialog" aria-labelledby="drawer-title" hidden>
+    <div class="drawer-head">
+      <div>
+        <h2 id="drawer-title"></h2>
+        <div class="sub" id="drawer-sub"></div>
+      </div>
+      <button class="btn icon close" id="drawer-close" type="button" aria-label="Close"></button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

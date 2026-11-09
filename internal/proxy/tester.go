@@ -61,6 +61,7 @@ type Tester struct {
 	maxAttempts  int  // Maximum number of attempts for each test type
 	dirty        bool // Set when the in-memory state has unsaved changes
 	stopFlush    chan struct{}
+	onChange     func(DomainView) // Optional observer for state changes
 }
 
 // NewTester creates a new tester with default retry period (1 hour) and max attempts (1)
@@ -179,6 +180,14 @@ func (t *Tester) GetNextTest(domain string) certificates.TestType {
 		retestDue = time.Since(status.LastTested) > t.retestPeriod
 	}
 
+	// Notify observers after the lock is released (deferred calls run LIFO)
+	changed := false
+	defer func() {
+		if changed {
+			t.notifyChanged(domain)
+		}
+	}()
+
 	// Phase 3 (write lock): update state
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -251,6 +260,7 @@ func (t *Tester) GetNextTest(domain string) certificates.TestType {
 
 		// Persist asynchronously via the flush loop
 		t.dirty = true
+		changed = true
 
 		return t.testOrder[0]
 	}
@@ -283,6 +293,7 @@ func (t *Tester) GetNextTest(domain string) certificates.TestType {
 
 		// Persist asynchronously via the flush loop
 		t.dirty = true
+		changed = true
 
 		return t.testOrder[0]
 	}
@@ -350,6 +361,9 @@ func (t *Tester) GetNextTest(domain string) certificates.TestType {
 
 // RecordTestResult records the result of a test
 func (t *Tester) RecordTestResult(domain string, testType certificates.TestType, success bool) certificates.TestType {
+	// Registered before the unlock so it runs after it (deferred calls are LIFO)
+	defer t.notifyChanged(domain)
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

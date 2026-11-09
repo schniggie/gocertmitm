@@ -7,8 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// Log levels reported to a Hook
+const (
+	LevelInfo    = "info"
+	LevelError   = "error"
+	LevelVerbose = "verbose"
+	LevelDebug   = "debug"
+)
+
+// Hook receives every line that is written to the log at an enabled level.
+// It is called synchronously and must not block or call back into the logger.
+type Hook func(level, reqID, msg string)
 
 // Logger provides logging functionality
 type Logger struct {
@@ -21,6 +34,25 @@ type Logger struct {
 	logFile       *os.File
 	nextReqID     uint64
 	mu            sync.Mutex // Mutex to protect nextReqID
+	hook          atomic.Pointer[Hook]
+}
+
+// SetHook installs (or, with nil, removes) a hook that observes log lines
+func (l *Logger) SetHook(h Hook) {
+	if h == nil {
+		l.hook.Store(nil)
+		return
+	}
+	l.hook.Store(&h)
+}
+
+// emit forwards a log line to the installed hook, if any
+func (l *Logger) emit(level, reqID, format string, v []interface{}) {
+	h := l.hook.Load()
+	if h == nil {
+		return
+	}
+	(*h)(level, reqID, fmt.Sprintf(format, v...))
 }
 
 // NewLogger creates a new logger
@@ -83,27 +115,32 @@ func (l *Logger) Close() error {
 // Infof logs an info message
 func (l *Logger) Infof(format string, v ...interface{}) {
 	l.infoLogger.Printf(format, v...)
+	l.emit(LevelInfo, "", format, v)
 }
 
 // InfoWithRequestIDf logs an info message with a request ID
 func (l *Logger) InfoWithRequestIDf(reqID, format string, v ...interface{}) {
 	l.infoLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+	l.emit(LevelInfo, reqID, format, v)
 }
 
 // Errorf logs an error message
 func (l *Logger) Errorf(format string, v ...interface{}) {
-	l.errorLogger.Printf(format, v...)
+	l.errorLogger.Output(2, fmt.Sprintf(format, v...))
+	l.emit(LevelError, "", format, v)
 }
 
 // ErrorWithRequestIDf logs an error message with a request ID
 func (l *Logger) ErrorWithRequestIDf(reqID, format string, v ...interface{}) {
-	l.errorLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+	l.errorLogger.Output(2, fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...))
+	l.emit(LevelError, reqID, format, v)
 }
 
 // Verbosef logs a verbose message
 func (l *Logger) Verbosef(format string, v ...interface{}) {
 	if l.verbose {
 		l.verboseLogger.Printf(format, v...)
+		l.emit(LevelVerbose, "", format, v)
 	}
 }
 
@@ -111,26 +148,29 @@ func (l *Logger) Verbosef(format string, v ...interface{}) {
 func (l *Logger) VerboseWithRequestIDf(reqID, format string, v ...interface{}) {
 	if l.verbose {
 		l.verboseLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+		l.emit(LevelVerbose, reqID, format, v)
 	}
 }
 
 // Debugf logs a debug message
 func (l *Logger) Debugf(format string, v ...interface{}) {
 	if l.debug {
-		l.debugLogger.Printf(format, v...)
+		l.debugLogger.Output(2, fmt.Sprintf(format, v...))
+		l.emit(LevelDebug, "", format, v)
 	}
 }
 
 // DebugWithRequestIDf logs a debug message with a request ID
 func (l *Logger) DebugWithRequestIDf(reqID, format string, v ...interface{}) {
 	if l.debug {
-		l.debugLogger.Printf("[%s] "+format, append([]interface{}{reqID}, v...)...)
+		l.debugLogger.Output(2, fmt.Sprintf("[%s] "+format, append([]interface{}{reqID}, v...)...))
+		l.emit(LevelDebug, reqID, format, v)
 	}
 }
 
 // Fatalf logs a fatal message and exits
 func (l *Logger) Fatalf(format string, v ...interface{}) {
-	l.errorLogger.Printf(format, v...)
+	l.errorLogger.Output(2, fmt.Sprintf(format, v...))
 	os.Exit(1)
 }
 

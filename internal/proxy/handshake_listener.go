@@ -214,6 +214,14 @@ func (s *Server) handleFailedTLSHandshake(rawConn net.Conn, sni string, err erro
 	s.logger.InfoWithRequestIDf(reqID, "[TLS] Handshake error from %s for %s with test type %s",
 		clientIP, sni, testType.GetTestTypeName())
 
+	s.publishHandshakeFailure(HandshakeEvent{
+		ReqID:    reqID,
+		ClientIP: clientIP,
+		SNI:      sni,
+		TestType: TestTypeKey(testType),
+		Error:    err.Error(),
+	})
+
 	nextTest := s.RecordFailedHandshake(sni, testType, reqID)
 
 	s.logger.InfoWithRequestIDf(reqID, "[NEXT] Moving to next test for %s: %s", sni, nextTest.GetTestTypeName())

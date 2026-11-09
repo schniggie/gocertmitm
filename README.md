@@ -22,6 +22,8 @@ GoCertMITM is a security testing tool for identifying TLS certificate validation
   - Detailed logs of intercepted data for analysis
   - Structured storage of test results for reporting
 
+- **Web Interface** (`-webui`): live dashboard of findings, per-domain test matrix, decrypted traffic and captured payloads, with retest controls and CSV/JSON export
+
 ## Installation
 
 ### Prerequisites
@@ -102,6 +104,41 @@ You can also run GoCertMITM using Docker:
   - Increase this value if you want to retry a test type multiple times before moving on
   - Higher values can be useful for unstable connections or intermittent failures
   - Setting to 1 ensures the tool moves quickly through test types
+- `-webui`: Enable the web interface (default: false)
+- `-webui-addr`: Listen address for the web interface (default: "127.0.0.1:8081")
+- `-webui-token`: Access token for the web interface (default: `$CERTMITM_WEBUI_TOKEN`, otherwise a random token is generated and printed to the console)
+- `-webui-noauth`: Disable web interface authentication; only requests whose `Host` is an IP literal or `localhost` are accepted (default: false)
+
+### Web Interface
+
+Start the proxy with `-webui` and open the URL printed on the console:
+
+```bash
+./certmitm -webui
+#   Web UI: http://127.0.0.1:8081/?token=4f1c…
+```
+
+The interface is a self-contained page embedded in the binary (no CDN or external assets, so it works on offline gateways). It updates live via Server-Sent Events:
+
+- **Overview**: vulnerable/testing/secure counts, findings, active clients, and a feed of verdict changes and TLS rejections
+- **Domains**: per-target test matrix (accepted / rejected / in progress / pending for every test type), filtering, CSV/JSON export, and per-domain **Retest** and **Forget** controls
+- **Traffic**: live decrypted and proxied requests, plus TLS handshakes clients rejected; click a request to view its captured headers and body (text/hex) or download the raw payload
+- **Payloads**: browse captures on disk, including ones from earlier runs
+- **Logs**: live log tail with level and text filters
+- **Setup**: running configuration, test catalogue, transparent-mode `iptables` snippet, and the GoCertMITM CA (fingerprint and `ca.pem` download)
+
+Security notes:
+
+- The interface binds to loopback by default. Captured payloads routinely contain credentials and session tokens, so prefer an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 gateway`) over binding to a routable address.
+- Every API request requires the token, sent either as `Authorization: Bearer <token>` or as the `HttpOnly`/`SameSite=Strict` session cookie set by the login page or the `?token=` link. State-changing calls also require an `X-CertMITM-CSRF` header and a same-origin `Origin`.
+- A generated token is printed to the console only; it is not written to the log file or to the live log stream. Pass a fixed token through `CERTMITM_WEBUI_TOKEN` rather than `-webui-token` to keep it out of the process list.
+- Captured data is attacker-controlled. It is rendered only through DOM text APIs under a strict Content-Security-Policy, and payload files are read through `os.Root`, so a crafted path or symlink cannot escape the payload directory.
+
+The JSON API (`/api/info`, `/api/stats`, `/api/domains`, `/api/events?topic=request|handshake|log|domain`, `/api/stream`, `/api/payloads/...`, `/api/export.{json,csv}`, `/api/ca.pem`) can be scripted directly:
+
+```bash
+curl -H "Authorization: Bearer $CERTMITM_WEBUI_TOKEN" http://127.0.0.1:8081/api/domains | jq '.[] | select(.verdict=="vulnerable") | {domain, accepted_test}'
+```
 
 ### Network Setup
 
