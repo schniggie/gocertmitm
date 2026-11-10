@@ -34,7 +34,12 @@ const TEST_INFO = {
   emudhra: {
     short: "EM",
     name: "eMudhra CA",
-    what: "Chains to the eMudhra intermediate whose private key is public. Acceptance means the trust store still trusts the compromised CA.",
+    what: "Signed with the leaked eMudhra intermediate key, serving the chain to emSign ECC Root CA - G3 first. Acceptance means a modern trust store still trusts the compromised CA (no revocation/CT enforcement). Go 1.27+ clients hard-distrust these keys.",
+  },
+  "emudhra-aaa": {
+    short: "EA",
+    name: "eMudhra via AAA",
+    what: "Same leaked key, serving the Sectigo AAA Certificate Services cross-sign first. Acceptance means an older or frozen trust store still trusts the compromised CA.",
   },
   "direct-tunnel": { short: "DT", name: "Tunnel", what: "All tests rejected; traffic is passed through without interception." },
 };

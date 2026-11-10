@@ -145,11 +145,12 @@ func (m *Manager) GenerateCertificate(domain string, testType TestType) (*Certif
 			return nil, fmt.Errorf("failed to generate new key: %v", err)
 		}
 		privateKey = newKey
-	case Emudhra:
+	case Emudhra, EmudhraAAA:
 		// Certificate signed with the publicly compromised eMudhra
-		// intermediate CA key (EM OV TLS CA - G3C)
+		// intermediate CA key (EM OV TLS CA - G3C); the test type selects
+		// which chain is served first
 		parentCert, parentKey = m.emudhra.leafSigner()
-		extraChainDER = m.emudhra.chainDER(m.EmudhraChainMode)
+		extraChainDER = m.emudhra.chainForTest(testType, m.EmudhraChainMode)
 	case RealCertificate:
 		// Use a real certificate for a different domain
 		realCert, realKey, err := m.loadRealCertificate(domain)
@@ -248,7 +249,7 @@ func (m *Manager) GenerateCertificate(domain string, testType TestType) (*Certif
 	}
 	// Serve the full compromised CA chain so clients can build a valid path
 	// to their trust store's roots
-	if testType == Emudhra {
+	if testType.IsEmudhra() {
 		tlsCert.Certificate = append(tlsCert.Certificate, extraChainDER...)
 	}
 

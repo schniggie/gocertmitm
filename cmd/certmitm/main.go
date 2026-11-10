@@ -29,11 +29,11 @@ var (
 	logDir       = flag.String("logdir", "./logs", "Directory to store logs")
 	payloadDir   = flag.String("payloaddir", "./payloads", "Directory to store request/response payloads")
 	savePayloads = flag.Bool("savepayloads", true, "Enable saving of request/response payloads")
-	testType     = flag.String("testtype", "self-signed", "Test type: self-signed, replaced-key, real-cert, real-ca, emudhra")
+	testType     = flag.String("testtype", "self-signed", "Test type: self-signed, replaced-key, real-cert, real-ca, emudhra, emudhra-aaa")
 	autoTest     = flag.Bool("autotest", true, "Automatically test all methods for each domain")
 	retrySeconds = flag.Int("retryseconds", 86400, "Time in seconds to wait before retesting a domain (default: 24 hours)")
 	maxAttempts  = flag.Int("maxattempts", 1, "Maximum number of attempts for each test type before moving to the next test")
-	emudhraChain = flag.String("emudhra-chain", "both", "Compromised eMudhra chain to serve: modern, old or both")
+	emudhraChain = flag.String("emudhra-chain", "both", "Chain served by the emudhra test: modern, old or both (emudhra-aaa always serves the Sectigo AAA chain first)")
 	webUI        = flag.Bool("webui", false, "Enable the web interface")
 	webUIAddr    = flag.String("webui-addr", "127.0.0.1:8081", "Address for the web interface (keep it off untrusted networks)")
 	webUIToken   = flag.String("webui-token", "", "Web interface access token (default: $CERTMITM_WEBUI_TOKEN, else randomly generated)")
@@ -99,6 +99,8 @@ func main() {
 		selectedTestType = certificates.RealCertificateAsCA
 	case "emudhra":
 		selectedTestType = certificates.Emudhra
+	case "emudhra-aaa":
+		selectedTestType = certificates.EmudhraAAA
 	default:
 		logger.Fatalf("Invalid test type: %s", *testType)
 	}

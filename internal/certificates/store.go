@@ -214,9 +214,9 @@ func (m *Manager) GetCertificate(domain string, testType TestType) (*tls.Certifi
 
 				// Saved eMudhra chains may have been written with a different
 				// chain mode; rebuild the served chain from the current mode
-				if testType == Emudhra && len(tlsCert.Certificate) > 0 {
+				if testType.IsEmudhra() && len(tlsCert.Certificate) > 0 {
 					rebuilt := [][]byte{tlsCert.Certificate[0]}
-					rebuilt = append(rebuilt, m.emudhra.chainDER(m.EmudhraChainMode)...)
+					rebuilt = append(rebuilt, m.emudhra.chainForTest(testType, m.EmudhraChainMode)...)
 					tlsCert.Certificate = rebuilt
 				}
 

@@ -205,6 +205,7 @@ func (s *Server) Info() Info {
 		certificates.RealCertificate,
 		certificates.RealCertificateAsCA,
 		certificates.Emudhra,
+		certificates.EmudhraAAA,
 		certificates.DirectTunnel,
 	}
 	for _, t := range types {

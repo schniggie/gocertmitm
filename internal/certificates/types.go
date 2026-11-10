@@ -24,9 +24,21 @@ const (
 	// DirectTunnel indicates that all tests failed and we should use a direct tunnel
 	DirectTunnel
 	// Emudhra tests if clients trust the publicly compromised eMudhra intermediate CA
-	// (see https://emudhra.we-have-a-problem.com/ and mitmproxy PR #8500)
+	// (see https://emudhra.we-have-a-problem.com/ and mitmproxy PR #8500).
+	// It serves the chain to emSign ECC Root CA - G3 first (modern trust stores).
 	Emudhra
+	// EmudhraAAA signs with the same compromised key but serves the chain
+	// cross-signed by Sectigo's AAA Certificate Services first, for older or
+	// frozen trust stores (mitmproxy's --emudhra-old ordering). OpenSSL-style
+	// clients only follow the first chain they are given, so both orders must
+	// be tried to cover both trust-store populations.
+	EmudhraAAA
 )
+
+// IsEmudhra reports whether the test type signs with the compromised eMudhra key
+func (t TestType) IsEmudhra() bool {
+	return t == Emudhra || t == EmudhraAAA
+}
 
 // GetTestTypeName returns a human-readable name for the test type
 func (t TestType) GetTestTypeName() string {
@@ -41,6 +53,8 @@ func (t TestType) GetTestTypeName() string {
 		return "Real Certificate as CA (Type 3)"
 	case Emudhra:
 		return "Compromised CA (eMudhra) (Type 4)"
+	case EmudhraAAA:
+		return "Compromised CA (eMudhra via Sectigo AAA) (Type 5)"
 	case DirectTunnel:
 		return "Direct Tunnel (No MITM)"
 	default:

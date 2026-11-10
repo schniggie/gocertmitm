@@ -170,6 +170,20 @@ func (ec *emudhraChain) validate() error {
 	return nil
 }
 
+// chainForTest returns the intermediates served for an eMudhra test type.
+// Emudhra honours the configured chain mode; EmudhraAAA always serves the
+// Sectigo AAA cross-sign first, followed by the modern chain.
+func (ec *emudhraChain) chainForTest(testType TestType, mode string) [][]byte {
+	if testType == EmudhraAAA {
+		return [][]byte{
+			ec.oldIntermediate.Raw,
+			ec.modernIntermediate.Raw,
+			ec.crossSignedRoot.Raw,
+		}
+	}
+	return ec.chainDER(mode)
+}
+
 // leafSigner returns the compromised CA key and certificate to sign leaf
 // certificates with
 func (ec *emudhraChain) leafSigner() (*x509.Certificate, *ecdsa.PrivateKey) {

@@ -22,6 +22,8 @@ func (m *Manager) getTestTypeCertDir(testType TestType) string {
 		dirName = "real-ca"
 	case Emudhra:
 		dirName = "emudhra"
+	case EmudhraAAA:
+		dirName = "emudhra-aaa"
 	default:
 		dirName = "unknown"
 	}
@@ -55,7 +57,7 @@ func (m *Manager) saveCertificate(domain string, testType TestType, certPair *Ce
 	defer certOut.Close()
 
 	chainCertificates := [][]byte{certPair.Certificate.Raw}
-	if testType == Emudhra && len(certPair.TLSCert.Certificate) > 0 {
+	if testType.IsEmudhra() && len(certPair.TLSCert.Certificate) > 0 {
 		chainCertificates = certPair.TLSCert.Certificate
 	}
 	for _, chainCert := range chainCertificates {
@@ -119,6 +121,7 @@ func (m *Manager) ensureCertDirs() error {
 		{RealCertificate, "real"},
 		{RealCertificateAsCA, "real-ca"},
 		{Emudhra, "emudhra"},
+		{EmudhraAAA, "emudhra-aaa"},
 	}
 
 	for _, tt := range testTypes {

@@ -9,7 +9,7 @@ GoCertMITM is a security testing tool for identifying TLS certificate validation
   2. **Replaced key certificates**: Tests if clients verify the certificate's public key
   3. **Real certificates**: Tests if clients accept valid certificates for different domains
   4. **Real certificates as CA**: Tests if clients accept certificates signed by valid but unauthorized CAs
-  5. **Compromised CA (eMudhra)**: Tests if clients still trust a CA whose signing keys were publicly disclosed (see https://emudhra.we-have-a-problem.com/)
+  5. **Compromised CA (eMudhra)**: Tests if clients still trust a CA whose signing keys were publicly disclosed (see https://emudhra.we-have-a-problem.com/), once with the modern chain and once with the Sectigo AAA chain served first
 
 - **Network Configuration**: Automatically configures the network to intercept connections:
   - Acts as a network gateway for client devices
@@ -88,10 +88,11 @@ You can also run GoCertMITM using Docker:
   - `replaced-key`: Test if clients verify the certificate's public key (Type 1)
   - `real-cert`: Test if clients accept valid certificates for different domains (Type 2)
   - `real-ca`: Test if clients accept certificates signed by valid but unauthorized CAs (Type 3)
-  - `emudhra`: Test if clients trust the publicly compromised eMudhra CA (Type 4)
+  - `emudhra`: Test if clients trust the publicly compromised eMudhra CA, modern chain first (Type 4)
+  - `emudhra-aaa`: Same compromised key, Sectigo `AAA Certificate Services` chain first, for older or frozen trust stores (Type 5)
   - When auto-testing is disabled, only this test type will be used
   - When auto-testing is enabled, this test type will be tried first, followed by the others
-- `-emudhra-chain`: Which compromised eMudhra chain variant to serve (default: "both")
+- `-emudhra-chain`: Which compromised eMudhra chain variant the `emudhra` test serves (default: "both"); `emudhra-aaa` always serves the AAA chain first
   - `modern`: chain via `emSign Root TLS CA - G3` (trusted by all modern trust stores)
   - `old`: chain cross-signed by `AAA Certificate Services` (frozen pre-2021 trust stores)
   - `both`: serve both variants with the modern one first; OpenSSL-style clients only build the first path
@@ -268,7 +269,8 @@ By default, all certificates are stored in the `./certs` directory (configurable
   │   └── example.com/
   │       ├── cert.pem
   │       └── key.pem
-  └── emudhra/              # Compromised CA (eMudhra) certificates, full chain
+  ├── emudhra/              # Compromised CA (eMudhra) certificates, full chain
+  └── emudhra-aaa/          # Same, Sectigo AAA chain served first
       └── example.com/
           ├── cert.pem      # Leaf plus the served compromised CA chain
           └── key.pem
@@ -332,7 +334,7 @@ By default, all certificates are stored in the `./certs` directory (configurable
 5. **Compromised CA (eMudhra) Test**:
    - No additional files required
    - The publicly disclosed eMudhra chain is embedded in the binary and validated against the published root certificates at startup
-   - Use `-emudhra-chain` (modern/old/both) to select which compromised chain variant is served
+   - Use `-emudhra-chain` (modern/old/both) to select which compromised chain variant the `emudhra` test serves; `emudhra-aaa` serves the Sectigo AAA chain first
 
 #### Certificate Format
 
@@ -468,18 +470,23 @@ This test determines if clients still trust a certificate authority whose signin
 - The full compromised CA chain is served in the handshake, exactly as eMudhra's infrastructure would
 - The certificates are indistinguishable from legitimately issued ones for clients whose trust store still contains the affected roots
 
-**Chain selection:** The compromised intermediate chains to two different trusted roots. Use `-emudhra-chain` to select which variant is served:
-- `modern` (default is `both`): chain via `emSign Root TLS CA - G3`, cross-signed by `emSign ECC Root CA - G3` — present in all modern trust stores
-- `old`: chain cross-signed by Sectigo's `AAA Certificate Services` — present in older or frozen pre-2021 trust stores (mirrors mitmproxy's `--emudhra-old`)
-- `both` (default): serve both variants; OpenSSL-style clients only consider the first path, so the modern variant is served first
+**Chain order matters, so there are two tests.** The compromised intermediate chains to two different trusted roots:
+- `emSign ECC Root CA - G3` (via `emSign Root TLS CA - G3`), present in modern trust stores
+- Sectigo's `AAA Certificate Services`, present in older or frozen pre-2021 trust stores
+
+OpenSSL-based clients (most embedded, IoT and server-side stacks) follow the first matching issuer in the served chain and do not backtrack. A single handshake therefore only reaches one of the two roots, whichever is served first. Auto-testing runs both orders:
+- `emudhra` (Type 4): modern chain first. `-emudhra-chain` can narrow it to `modern` or `old` only; the default `both` serves both, modern first.
+- `emudhra-aaa` (Type 5): AAA cross-sign first, then the modern chain, the same ordering as mitmproxy's `--emudhra-old`.
+
+Which of the two a client accepts tells you which trust store it ships.
 
 ```bash
-# Explicit eMudhra test type
+# Explicit eMudhra test types
 ./certmitm -testtype emudhra
-
-# Serve only the AAA Certificate Services cross-sign for frozen clients
-./certmitm -testtype emudhra -emudhra-chain old
+./certmitm -testtype emudhra-aaa -autotest=false
 ```
+
+**Go clients:** Go's `crypto/x509` (Go 1.27+) has a built-in distrust list containing the eight leaked eMudhra intermediate keys, so Go clients reject these chains whatever their trust store contains. A Go client showing as "rejected" for both eMudhra tests is expected, not a sign of a well-maintained trust store.
 
 The compromised CA material is embedded in the binary (validated against the disclosed root certificates at startup) and is publicly available; it does not require any file setup on disk.
 
@@ -492,7 +499,7 @@ The compromised CA material is embedded in the binary (validated against the dis
 - Clients that skip intermediate revocation checking (OneCRL/CRLite/CRLSets are browser-specific)
 - Frozen pre-2021 trust stores that still trust `AAA Certificate Services`
 
-These five testing approaches comprehensively cover the most common certificate validation vulnerabilities while keeping the testing process efficient. By testing against these specific scenarios, GoCertMITM can identify weaknesses in TLS implementations that could be exploited by attackers to perform man-in-the-middle attacks.
+These testing approaches comprehensively cover the most common certificate validation vulnerabilities while keeping the testing process efficient. By testing against these specific scenarios, GoCertMITM can identify weaknesses in TLS implementations that could be exploited by attackers to perform man-in-the-middle attacks.
 
 **Operator note:** tests 2 and 5 produce certificates that a vulnerable client cannot distinguish from legitimate traffic. Only run GoCertMITM against systems you are authorized to test; verifying a "successful MITM" means intercepting someone — in authorized testing, that's the point, and the results are what you are there to measure.
 

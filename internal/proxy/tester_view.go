@@ -43,6 +43,8 @@ func TestTypeKey(t certificates.TestType) string {
 		return "real-ca"
 	case certificates.Emudhra:
 		return "emudhra"
+	case certificates.EmudhraAAA:
+		return "emudhra-aaa"
 	case certificates.DirectTunnel:
 		return "direct-tunnel"
 	default:
@@ -63,6 +65,8 @@ func testTypeShort(t certificates.TestType) string {
 		return "Leaf as CA"
 	case certificates.Emudhra:
 		return "eMudhra CA"
+	case certificates.EmudhraAAA:
+		return "eMudhra via AAA"
 	case certificates.DirectTunnel:
 		return "Tunnel"
 	default:

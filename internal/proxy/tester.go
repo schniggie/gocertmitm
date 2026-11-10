@@ -84,6 +84,7 @@ func NewTesterWithRetryPeriod(logger *logging.Logger, initialTestType certificat
 		certificates.RealCertificate,
 		certificates.RealCertificateAsCA,
 		certificates.Emudhra,
+		certificates.EmudhraAAA,
 	} {
 		if testType != initialTestType {
 			testOrder = append(testOrder, testType)
@@ -674,6 +675,7 @@ func (t *Tester) UpdateTestOrder(initialTestType certificates.TestType) {
 		certificates.RealCertificate,
 		certificates.RealCertificateAsCA,
 		certificates.Emudhra,
+		certificates.EmudhraAAA,
 	} {
 		if testType != initialTestType {
 			testOrder = append(testOrder, testType)
@@ -860,6 +862,8 @@ func (t *Tester) LoadFromJSON() error {
 				testType = certificates.RealCertificateAsCA
 			case "Compromised CA (eMudhra) (Type 4)", "Compromised CA":
 				testType = certificates.Emudhra
+			case "Compromised CA (eMudhra via Sectigo AAA) (Type 5)":
+				testType = certificates.EmudhraAAA
 			case "Direct Tunnel (No MITM)":
 				testType = certificates.DirectTunnel
 			default:
@@ -883,6 +887,8 @@ func (t *Tester) LoadFromJSON() error {
 				successfulTest = certificates.RealCertificateAsCA
 			case "Compromised CA (eMudhra) (Type 4)", "Compromised CA":
 				successfulTest = certificates.Emudhra
+			case "Compromised CA (eMudhra via Sectigo AAA) (Type 5)":
+				successfulTest = certificates.EmudhraAAA
 			case "Direct Tunnel (No MITM)":
 				successfulTest = certificates.DirectTunnel
 			default:
@@ -905,6 +911,8 @@ func (t *Tester) LoadFromJSON() error {
 				testType = certificates.RealCertificateAsCA
 			case "Compromised CA (eMudhra) (Type 4)", "Compromised CA":
 				testType = certificates.Emudhra
+			case "Compromised CA (eMudhra via Sectigo AAA) (Type 5)":
+				testType = certificates.EmudhraAAA
 			case "Direct Tunnel (No MITM)":
 				testType = certificates.DirectTunnel
 			default:
